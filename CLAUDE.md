@@ -1,30 +1,37 @@
 # CLAUDE.md
 
-This repo is a playground for experimenting with custom software for the Elgato Stream Deck Plus.
+A modular Stream Deck Plus application combining media controls, calendar, home automation, weather, and more.
 
-## Goals
+See [ROADMAP.md](ROADMAP.md) for detailed architecture plans and feature backlog.
 
-- Build custom integrations and automations for the Stream Deck Plus
-- Experiment with the Go library (dh1tw/streamdeck) and potentially Python alternatives
-- Create things the official Elgato software can't do (or requires an account for)
+## Project Structure
 
-## Hardware Details
+```
+cmd/
+  demo/        - Basic Stream Deck Plus demo
+  nowplaying/  - Media controls module (current main app)
+```
 
-Stream Deck Plus features:
-- 8 customizable LCD keys (72x72 pixels each)
-- 4 rotary encoders (dials) with push-to-click
-- Touch strip display
-- USB-C connection
+## Running
+
+```bash
+# Build and run now-playing
+go build -o ./bin/nowplaying ./cmd/nowplaying && ./bin/nowplaying
+```
+
+## Hardware
+
+Stream Deck Plus: 8 LCD keys (72x72px), 4 rotary dials, touch strip (800x100px), USB-C.
+
+## Dependencies
+
+- `media-control` - macOS now-playing info
+  ```bash
+  brew tap ungive/media-control && brew install media-control
+  ```
 
 ## Development Notes
 
-- The Stream Deck is a USB HID device
-- On macOS, may need to handle device permissions
-- Only one application can control the device at a time (quit official app when testing)
-
-## Potential Projects
-
-- Apple Music now-playing display with album art
-- Home Assistant controls (already have HA on Tailscale)
-- Custom OBS integration
-- System monitoring displays on the dials
+- Only one app can control the device at a time (quit Elgato software when testing)
+- Using `rafaelmartins.com/p/streamdeck` for Go bindings (has dial/strip support)
+- SVG icons from Lucide, rendered with `oksvg`
