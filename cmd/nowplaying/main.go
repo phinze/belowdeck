@@ -16,10 +16,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/srwiley/oksvg"
+	"github.com/srwiley/rasterx"
 	"golang.org/x/image/colornames"
 	"golang.org/x/image/draw"
 	"golang.org/x/image/font"
@@ -34,9 +37,18 @@ var fontBold []byte
 //go:embed fonts/PublicSans-Regular.ttf
 var fontRegular []byte
 
+//go:embed icons/play.svg
+var iconPlaySVG string
+
+//go:embed icons/pause.svg
+var iconPauseSVG string
+
+//go:embed icons/info.svg
+var iconInfoSVG string
+
 var (
-	titleFace   font.Face
-	artistFace  font.Face
+	titleFace  font.Face
+	artistFace font.Face
 )
 
 // NowPlaying represents the media-control JSON output (with --micros flag)
@@ -60,21 +72,13 @@ type LiveState struct {
 
 var liveState = &LiveState{}
 
-// Layout:
-// [1:Prev] [2:Play] [3:Art] [4:Art]
-// [5:Next] [6:Info] [7:Art] [8:Art]
+// Layout (2 keys above left half of strip, rest available):
+// [1:---] [2:---] [3:---] [4:---]
+// [5:Play] [6:Info] [7:---] [8:---]
 
 var (
-	keyPrev = streamdeck.KEY_1
-	keyPlay = streamdeck.KEY_2
-	keyNext = streamdeck.KEY_5
+	keyPlay = streamdeck.KEY_5
 	keyInfo = streamdeck.KEY_6
-
-	// Album art keys (2x2 grid on right side)
-	artKeys = []streamdeck.KeyID{
-		streamdeck.KEY_3, streamdeck.KEY_4, // top row
-		streamdeck.KEY_7, streamdeck.KEY_8, // bottom row
-	}
 )
 
 func initFonts() error {
@@ -181,7 +185,7 @@ func main() {
 	var lastArtwork string
 	var lastPlaying bool
 
-	log.Println("Ready! Controls on left, album art on right")
+	log.Println("Ready! Media controls on left keys, now playing on left half of strip")
 
 	for {
 		select {
@@ -317,11 +321,9 @@ var cachedArtworkHash string
 func updateDisplay(device *streamdeck.Device, lastArtwork *string, lastPlaying *bool) {
 	np := getLiveState()
 
-	// Update artwork if changed
+	// Cache artwork for touch strip thumbnail if changed
 	if np.ArtworkData != "" && np.ArtworkData != *lastArtwork {
 		*lastArtwork = np.ArtworkData
-		updateArtwork(device, np.ArtworkData)
-		// Cache decoded artwork for touch strip
 		if img := decodeArtwork(np.ArtworkData); img != nil {
 			cachedArtwork = img
 			cachedArtworkHash = np.ArtworkData
@@ -335,7 +337,7 @@ func updateDisplay(device *streamdeck.Device, lastArtwork *string, lastPlaying *
 		drawPlayPauseIcon(device, np.Playing)
 	}
 
-	// Update touch strip with album art, text, and progress
+	// Update touch strip (left half only) with album art, text, and progress
 	updateTouchStrip(device, &np)
 }
 
@@ -349,46 +351,6 @@ func decodeArtwork(artworkBase64 string) image.Image {
 		return nil
 	}
 	return img
-}
-
-func updateArtwork(device *streamdeck.Device, artworkBase64 string) {
-	img := decodeArtwork(artworkBase64)
-	if img == nil {
-		log.Printf("Failed to decode artwork")
-		return
-	}
-
-	keyRect, err := device.GetKeyImageRectangle()
-	if err != nil {
-		log.Printf("Failed to get key size: %v", err)
-		return
-	}
-
-	keyW := keyRect.Dx()
-	keyH := keyRect.Dy()
-
-	// Scale album art to 2x2 key size (square)
-	totalSize := keyW * 2
-	scaled := scaleImageSquare(img, totalSize)
-
-	// Split into 4 tiles for the 2x2 grid
-	positions := []image.Point{
-		{0, 0}, {1, 0},
-		{0, 1}, {1, 1},
-	}
-
-	for i, key := range artKeys {
-		pos := positions[i]
-		tile := image.NewRGBA(image.Rect(0, 0, keyW, keyH))
-		srcRect := image.Rect(pos.X*keyW, pos.Y*keyH, (pos.X+1)*keyW, (pos.Y+1)*keyH)
-		draw.Draw(tile, tile.Bounds(), scaled, srcRect.Min, draw.Src)
-
-		if err := device.SetKeyImage(key, tile); err != nil {
-			log.Printf("Failed to set key %d image: %v", key, err)
-		}
-	}
-
-	log.Println("Updated album artwork")
 }
 
 func scaleImageSquare(src image.Image, size int) image.Image {
@@ -421,37 +383,39 @@ func updateTouchStrip(device *streamdeck.Device, np *NowPlaying) {
 	}
 
 	img := image.NewRGBA(rect)
-	w := rect.Dx()
+	fullW := rect.Dx()
 	h := rect.Dy()
 
-	// Background - dark
+	// Only use left half of the strip
+	w := fullW / 2
+
+	// Background - dark (full strip to clear any previous content)
 	bgColor := color.RGBA{25, 25, 25, 255}
 	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
 
-	// Layout: [Art 80px] [10px gap] [Text area] [Progress bar at bottom]
-	artSize := 80
-	artMargin := 10
-	textX := artSize + artMargin + 10
-	progressH := 6
-	progressMargin := 10 // bump up from bottom edge
+	// Layout for left half: [Art full height] [gap] [Text + progress]
+	artSize := h // Full height bleed
+	textX := artSize + 8
+	progressH := 5
+	progressMargin := 8
 
-	// Draw album art thumbnail on left
+	// Draw album art thumbnail on left, full bleed
 	if cachedArtwork != nil {
-		artRect := image.Rect(artMargin, (h-artSize)/2, artMargin+artSize, (h+artSize)/2)
+		artRect := image.Rect(0, 0, artSize, artSize)
 		thumb := scaleImageSquare(cachedArtwork, artSize)
 		draw.Draw(img, artRect, thumb, image.Point{}, draw.Over)
 	}
 
-	// Draw title (bold, larger)
+	// Draw title (bold)
 	if np.Title != "" {
 		titleColor := color.White
-		drawText(img, np.Title, textX, 32, titleFace, titleColor, w-textX-20)
+		drawText(img, np.Title, textX, 30, titleFace, titleColor, w-textX-10)
 	}
 
 	// Draw artist (regular, smaller, gray)
 	if np.Artist != "" {
 		artistColor := color.RGBA{180, 180, 180, 255}
-		drawText(img, np.Artist, textX, 58, artistFace, artistColor, w-textX-20)
+		drawText(img, np.Artist, textX, 54, artistFace, artistColor, w-textX-10)
 	}
 
 	// Calculate live elapsed time
@@ -469,7 +433,7 @@ func updateTouchStrip(device *streamdeck.Device, np *NowPlaying) {
 
 	// Progress bar background
 	progressBg := color.RGBA{60, 60, 60, 255}
-	progressRect := image.Rect(textX, h-progressMargin-progressH, w-20, h-progressMargin)
+	progressRect := image.Rect(textX, h-progressMargin-progressH, w-10, h-progressMargin)
 	draw.Draw(img, progressRect, &image.Uniform{progressBg}, image.Point{}, draw.Src)
 
 	// Progress bar fill
@@ -481,14 +445,13 @@ func updateTouchStrip(device *streamdeck.Device, np *NowPlaying) {
 	progressFill := image.Rect(textX, h-progressMargin-progressH, textX+progressW, h-progressMargin)
 	draw.Draw(img, progressFill, &image.Uniform{progressColor}, image.Point{}, draw.Src)
 
-	// Draw time info
+	// Draw time (elapsed / total) above progress bar, right-aligned
 	if durationMicros > 0 {
 		elapsed := formatDurationMicros(elapsedMicros)
 		total := formatDurationMicros(durationMicros)
 		timeStr := fmt.Sprintf("%s / %s", elapsed, total)
 		timeColor := color.RGBA{120, 120, 120, 255}
-		// Draw right-aligned near progress bar
-		drawText(img, timeStr, w-100, h-progressMargin-progressH-8, artistFace, timeColor, 90)
+		drawTextRightAligned(img, timeStr, w-10, h-progressMargin-progressH-6, artistFace, timeColor)
 	}
 
 	device.SetTouchStripImage(img)
@@ -512,6 +475,20 @@ func drawText(img *image.RGBA, text string, x, y int, face font.Face, col color.
 		Dot:  fixed.Point26_6{X: fixed.I(x), Y: fixed.I(y)},
 	}
 	d.DrawString(truncated)
+}
+
+func drawTextRightAligned(img *image.RGBA, text string, rightX, y int, face font.Face, col color.Color) {
+	// Measure text width and draw so it ends at rightX
+	width := font.MeasureString(face, text).Ceil()
+	x := rightX - width
+
+	d := &font.Drawer{
+		Dst:  img,
+		Src:  image.NewUniform(col),
+		Face: face,
+		Dot:  fixed.Point26_6{X: fixed.I(x), Y: fixed.I(y)},
+	}
+	d.DrawString(text)
 }
 
 func truncateText(text string, face font.Face, maxWidth int) string {
@@ -540,13 +517,10 @@ func truncateText(text string, face font.Face, maxWidth int) string {
 }
 
 func drawControlIcons(device *streamdeck.Device) {
+	drawPlayPauseIcon(device, false)
 	keyRect, _ := device.GetKeyImageRectangle()
 	size := keyRect.Dx()
-
-	device.SetKeyImage(keyPrev, drawPrevIcon(size))
-	drawPlayPauseIcon(device, false)
-	device.SetKeyImage(keyNext, drawNextIcon(size))
-	device.SetKeyImage(keyInfo, drawInfoIcon(size))
+	device.SetKeyImage(keyInfo, renderSVGIcon(iconInfoSVG, size, colornames.Deepskyblue))
 }
 
 func drawPlayPauseIcon(device *streamdeck.Device, playing bool) {
@@ -554,147 +528,49 @@ func drawPlayPauseIcon(device *streamdeck.Device, playing bool) {
 	size := keyRect.Dx()
 
 	if playing {
-		device.SetKeyImage(keyPlay, drawPauseIcon(size))
+		device.SetKeyImage(keyPlay, renderSVGIcon(iconPauseSVG, size, colornames.Orange))
 	} else {
-		device.SetKeyImage(keyPlay, drawPlayIcon(size))
+		device.SetKeyImage(keyPlay, renderSVGIcon(iconPlaySVG, size, colornames.Limegreen))
 	}
 }
 
-func drawPrevIcon(size int) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	fillRect(img, color.RGBA{40, 40, 40, 255})
+// renderSVGIcon renders an SVG string to an image with the given size and color
+func renderSVGIcon(svgContent string, size int, iconColor color.Color) image.Image {
+	// Replace currentColor with the actual color
+	r, g, b, _ := iconColor.RGBA()
+	hexColor := fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
+	svgContent = strings.ReplaceAll(svgContent, "currentColor", hexColor)
 
-	iconColor := colornames.White
-	center := size / 2
-	iconSize := size / 3
-
-	barW := iconSize / 4
-	fillRectArea(img, iconColor, center-iconSize, center-iconSize/2, barW, iconSize)
-	drawTriangleLeft(img, iconColor, center-iconSize/2, center, iconSize/2)
-	drawTriangleLeft(img, iconColor, center+iconSize/4, center, iconSize/2)
-
-	return img
-}
-
-func drawNextIcon(size int) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	fillRect(img, color.RGBA{40, 40, 40, 255})
-
-	iconColor := colornames.White
-	center := size / 2
-	iconSize := size / 3
-
-	drawTriangleRight(img, iconColor, center-iconSize/2, center, iconSize/2)
-	drawTriangleRight(img, iconColor, center+iconSize/4, center, iconSize/2)
-	barW := iconSize / 4
-	fillRectArea(img, iconColor, center+iconSize-barW, center-iconSize/2, barW, iconSize)
-
-	return img
-}
-
-func drawPlayIcon(size int) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	fillRect(img, color.RGBA{40, 40, 40, 255})
-
-	iconColor := colornames.Limegreen
-	center := size / 2
-	iconSize := size / 3
-
-	drawTriangleRight(img, iconColor, center-iconSize/3, center, iconSize)
-
-	return img
-}
-
-func drawPauseIcon(size int) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	fillRect(img, color.RGBA{40, 40, 40, 255})
-
-	iconColor := colornames.Orange
-	center := size / 2
-	barW := size / 8
-	barH := size / 3
-	gap := size / 8
-
-	fillRectArea(img, iconColor, center-gap-barW, center-barH/2, barW, barH)
-	fillRectArea(img, iconColor, center+gap, center-barH/2, barW, barH)
-
-	return img
-}
-
-func drawInfoIcon(size int) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	fillRect(img, color.RGBA{40, 40, 40, 255})
-
-	iconColor := colornames.Deepskyblue
-	center := size / 2
-
-	dotR := size / 12
-	fillCircle(img, iconColor, center, center-size/5, dotR)
-
-	stemW := size / 8
-	stemH := size / 4
-	fillRectArea(img, iconColor, center-stemW/2, center-size/12, stemW, stemH)
-
-	return img
-}
-
-func fillRect(img *image.RGBA, c color.Color) {
-	draw.Draw(img, img.Bounds(), &image.Uniform{c}, image.Point{}, draw.Src)
-}
-
-func fillRectArea(img *image.RGBA, c color.Color, x, y, w, h int) {
-	rect := image.Rect(x, y, x+w, y+h)
-	draw.Draw(img, rect, &image.Uniform{c}, image.Point{}, draw.Src)
-}
-
-func fillCircle(img *image.RGBA, c color.Color, cx, cy, r int) {
-	for y := cy - r; y <= cy+r; y++ {
-		for x := cx - r; x <= cx+r; x++ {
-			dx := x - cx
-			dy := y - cy
-			if dx*dx+dy*dy <= r*r {
-				img.Set(x, y, c)
-			}
-		}
+	// Parse SVG
+	icon, err := oksvg.ReadIconStream(strings.NewReader(svgContent))
+	if err != nil {
+		log.Printf("Failed to parse SVG: %v", err)
+		return image.NewRGBA(image.Rect(0, 0, size, size))
 	}
-}
 
-func drawTriangleRight(img *image.RGBA, c color.Color, x, cy, size int) {
-	for i := 0; i < size; i++ {
-		halfH := (size - i) * size / (2 * size)
-		for dy := -halfH; dy <= halfH; dy++ {
-			img.Set(x+i, cy+dy, c)
-		}
-	}
-}
+	// Create output image with dark background
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	bgColor := color.RGBA{40, 40, 40, 255}
+	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
 
-func drawTriangleLeft(img *image.RGBA, c color.Color, x, cy, size int) {
-	for i := 0; i < size; i++ {
-		halfH := (size - i) * size / (2 * size)
-		for dy := -halfH; dy <= halfH; dy++ {
-			img.Set(x-i, cy+dy, c)
-		}
-	}
+	// Calculate scaling and centering
+	iconSize := float64(size) * 0.6 // Icon takes 60% of button
+	padding := (float64(size) - iconSize) / 2
+
+	icon.SetTarget(padding, padding, iconSize, iconSize)
+
+	// Render to image
+	scanner := rasterx.NewScannerGV(size, size, img, img.Bounds())
+	raster := rasterx.NewDasher(size, size, scanner)
+	icon.Draw(raster, 1.0)
+
+	return img
 }
 
 func setupKeyControls(device *streamdeck.Device) {
-	device.AddKeyHandler(keyPrev, func(d *streamdeck.Device, k *streamdeck.Key) error {
-		log.Println("Key: Previous track")
-		exec.Command("media-control", "previous-track").Run()
-		k.WaitForRelease()
-		return nil
-	})
-
 	device.AddKeyHandler(keyPlay, func(d *streamdeck.Device, k *streamdeck.Key) error {
 		log.Println("Key: Toggle play/pause")
 		go exec.Command("media-control", "toggle-play-pause").Run()
-		k.WaitForRelease()
-		return nil
-	})
-
-	device.AddKeyHandler(keyNext, func(d *streamdeck.Device, k *streamdeck.Key) error {
-		log.Println("Key: Next track")
-		exec.Command("media-control", "next-track").Run()
 		k.WaitForRelease()
 		return nil
 	})
