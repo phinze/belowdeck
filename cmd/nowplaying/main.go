@@ -12,6 +12,7 @@ import (
 	"github.com/phinze/gatolab/internal/coordinator"
 	"github.com/phinze/gatolab/internal/module"
 	"github.com/phinze/gatolab/internal/modules/nowplaying"
+	"github.com/phinze/gatolab/internal/modules/weather"
 	"rafaelmartins.com/p/streamdeck"
 )
 
@@ -56,6 +57,13 @@ func main() {
 		Dials:     []module.DialID{module.Dial1, module.Dial2},
 	})
 
+	// Create and register weather module
+	w := weather.New(device)
+	coord.RegisterModule(w, module.Resources{
+		Keys:      []module.KeyID{module.Key1},
+		StripRect: image.Rect(400, 0, 800, 100),
+	})
+
 	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -69,7 +77,7 @@ func main() {
 		errChan <- coord.Start(ctx)
 	}()
 
-	log.Println("Ready! Media controls on left keys, now playing on left half of strip")
+	log.Println("Ready! Media controls on keys 5-6, weather on key 1")
 
 	// Wait for shutdown signal or error
 	select {
