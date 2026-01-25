@@ -45,13 +45,20 @@ Team presence and status from custom Around app.
 
 ## Architecture
 
-### Phase 1: Module System Foundation
+### Phase 1: Module System Foundation ✅
 
 Define a clean module interface that allows features to:
 - Declare resource requirements (keys, strip regions, dials)
 - Handle their own lifecycle (init, update, cleanup)
 - Render to allocated screen regions
 - Respond to input events (key press, dial rotate/press)
+
+**Implemented in `internal/module/`:**
+- `resources.go` - `KeyID`, `DialID`, `Resources` types with helper methods
+- `events.go` - `DialEvent`, `KeyEvent`, `TouchStripEvent` structured event types
+- `module.go` - `Module` interface definition
+- `base.go` - `BaseModule` with default no-op implementations for embedding
+- `convert.go` - Conversion helpers to/from streamdeck library types
 
 ```go
 type Module interface {
@@ -64,8 +71,9 @@ type Module interface {
     RenderStrip() image.Image  // Module's strip segment
 
     // Input handling
-    HandleKey(id KeyID) error
+    HandleKey(id KeyID, event KeyEvent) error
     HandleDial(id DialID, event DialEvent) error
+    HandleStripTouch(event TouchStripEvent) error
 }
 
 type Resources struct {
