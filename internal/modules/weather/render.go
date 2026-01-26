@@ -72,24 +72,14 @@ func (m *Module) initFonts() error {
 		return fmt.Errorf("parse bold font: %w", err)
 	}
 
-	// Large temp for key
-	m.tempFace, err = opentype.NewFace(ttBold, &opentype.FaceOptions{
-		Size:    20,
-		DPI:     72,
-		Hinting: font.HintingFull,
-	})
-	if err != nil {
-		return fmt.Errorf("create temp face: %w", err)
-	}
-
-	// Smaller temp for strip
+	// Large temp for strip
 	m.tempSmallFace, err = opentype.NewFace(ttBold, &opentype.FaceOptions{
 		Size:    32,
 		DPI:     72,
 		Hinting: font.HintingFull,
 	})
 	if err != nil {
-		return fmt.Errorf("create temp small face: %w", err)
+		return fmt.Errorf("create temp face: %w", err)
 	}
 
 	ttRegular, err := opentype.Parse(fontRegular)
@@ -109,55 +99,39 @@ func (m *Module) initFonts() error {
 	return nil
 }
 
-// renderWeatherKey renders the weather key with icon and temperature.
-func (m *Module) renderWeatherKey(size int, current CurrentWeather) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	draw.Draw(img, img.Bounds(), &image.Uniform{colorKeyBg}, image.Point{}, draw.Src)
-
-	// Get icon and color for current conditions
-	iconSVG, iconColor := getWeatherIcon(current.Icon)
-
-	// Draw icon in upper portion (60% of space)
-	iconSize := int(float64(size) * 0.5)
-	iconPadding := (size - iconSize) / 2
-	iconY := 4
-
-	iconImg := renderSVGIcon(iconSVG, iconSize, iconColor)
-	iconRect := image.Rect(iconPadding, iconY, iconPadding+iconSize, iconY+iconSize)
-	draw.Draw(img, iconRect, iconImg, image.Point{}, draw.Over)
-
-	// Draw temperature below icon
-	if current.Temp != 0 {
-		tempStr := fmt.Sprintf("%.0f°", current.Temp)
-		m.drawTextCentered(img, tempStr, size/2, size-12, m.tempFace, colorWhite)
-	}
-
-	return img
-}
-
 // renderStrip renders the weather strip segment.
 func (m *Module) renderStrip(rect image.Rectangle, current CurrentWeather, daily DailyForecast, precip PrecipForecast) image.Image {
 	// Create full-size image but only fill our region (400-800)
 	img := image.NewRGBA(rect)
+	h := rect.Dy()
 
 	// Only fill our region with background (don't touch 0-400)
-	myRegion := image.Rect(400, 0, 800, rect.Dy())
+	myRegion := image.Rect(400, 0, 800, h)
 	draw.Draw(img, myRegion, &image.Uniform{colorBackground}, image.Point{}, draw.Src)
-
-	// Draw at absolute coordinates
-	// Left section: 400-580 (current temp, feels like, condition)
-	// Right section: 600-790 (high/low, precip)
-	leftX := 410
-	rightX := 600
-	h := rect.Dy()
 
 	// If no data yet, show placeholder
 	if current.Temp == 0 {
-		m.drawText(img, "Loading...", leftX, h/2+6, m.conditionFace, colorGray)
+		m.drawText(img, "Loading...", 410, h/2+6, m.conditionFace, colorGray)
 		return img
 	}
 
-	// LEFT SECTION
+	// Layout (400-800, 400px wide):
+	// Icon: 400-480 (centered 70px icon with padding)
+	// Left text: 490-610 (temp, feels like, condition)
+	// Right text: 620-790 (high/low, precip)
+
+	// ICON (left side)
+	iconSVG, iconColor := getWeatherIcon(current.Icon)
+	iconSize := 70
+	iconImg := renderSVGIcon(iconSVG, iconSize, iconColor)
+	iconX := 405
+	iconY := (h - iconSize) / 2
+	iconRect := image.Rect(iconX, iconY, iconX+iconSize, iconY+iconSize)
+	draw.Draw(img, iconRect, iconImg, image.Point{}, draw.Over)
+
+	// LEFT TEXT SECTION
+	leftX := 490
+
 	// Current temperature (large)
 	tempStr := fmt.Sprintf("%.0f°", current.Temp)
 	m.drawText(img, tempStr, leftX, 38, m.tempSmallFace, colorWhite)
@@ -176,7 +150,9 @@ func (m *Module) renderStrip(rect image.Rectangle, current CurrentWeather, daily
 	}
 	m.drawText(img, condition, leftX, 82, m.conditionFace, colorGray)
 
-	// RIGHT SECTION
+	// RIGHT TEXT SECTION
+	rightX := 620
+
 	// High/Low
 	if daily.TempMax != 0 || daily.TempMin != 0 {
 		hiLoStr := fmt.Sprintf("H:%.0f° L:%.0f°", daily.TempMax, daily.TempMin)
@@ -185,7 +161,6 @@ func (m *Module) renderStrip(rect image.Rectangle, current CurrentWeather, daily
 
 	// Precipitation forecast
 	if precip.Description != "" {
-		// Use appropriate color based on precip type
 		precipColor := colorRain
 		if precip.Type == "Snow" || precip.Type == "Sleet" {
 			precipColor = colorSnow
@@ -275,16 +250,3 @@ func (m *Module) drawText(img *image.RGBA, text string, x, y int, face font.Face
 	d.DrawString(text)
 }
 
-// drawTextCentered draws text centered horizontally at the given Y position.
-func (m *Module) drawTextCentered(img *image.RGBA, text string, centerX, y int, face font.Face, col color.Color) {
-	width := font.MeasureString(face, text).Ceil()
-	x := centerX - width/2
-
-	d := &font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(col),
-		Face: face,
-		Dot:  fixed.Point26_6{X: fixed.I(x), Y: fixed.I(y)},
-	}
-	d.DrawString(text)
-}

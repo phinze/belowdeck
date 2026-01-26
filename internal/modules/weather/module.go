@@ -35,7 +35,6 @@ type Module struct {
 	mu    sync.RWMutex
 
 	// Fonts
-	tempFace      font.Face
 	tempSmallFace font.Face
 	conditionFace font.Face
 
@@ -188,16 +187,8 @@ func (m *Module) fetchWeather(ctx context.Context) {
 
 // RenderKeys returns images for the module's keys.
 func (m *Module) RenderKeys() map[module.KeyID]image.Image {
-	keyRect, _ := m.device.GetKeyImageRectangle()
-	size := keyRect.Dx()
-
-	keys := make(map[module.KeyID]image.Image)
-	current, _, _ := m.state.get()
-
-	// Key 1: Weather icon + current temp
-	keys[module.Key1] = m.renderWeatherKey(size, current)
-
-	return keys
+	// Weather module doesn't use keys
+	return nil
 }
 
 // RenderStrip returns the touch strip image.
@@ -217,21 +208,7 @@ func (m *Module) RenderStrip() image.Image {
 
 // HandleKey processes key events.
 func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
-	if !event.Pressed {
-		return nil
-	}
-
-	if id == module.Key1 {
-		current, daily, precip := m.state.get()
-		precipInfo := "No precipitation expected"
-		if precip.Description != "" {
-			precipInfo = precip.Description
-		}
-		log.Printf("Weather: %.0f°F (feels %.0f°F) %s | High: %.0f°F Low: %.0f°F | Humidity: %d%% | Wind: %.0f mph | %s",
-			current.Temp, current.FeelsLike, current.Description, daily.TempMax, daily.TempMin,
-			current.Humidity, current.WindSpeed, precipInfo)
-	}
-
+	// Weather module doesn't use keys
 	return nil
 }
 

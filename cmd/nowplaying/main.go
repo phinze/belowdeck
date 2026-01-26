@@ -60,7 +60,6 @@ func main() {
 	// Create and register weather module
 	w := weather.New(device)
 	coord.RegisterModule(w, module.Resources{
-		Keys:      []module.KeyID{module.Key1},
 		StripRect: image.Rect(400, 0, 800, 100),
 	})
 
@@ -77,7 +76,7 @@ func main() {
 		errChan <- coord.Start(ctx)
 	}()
 
-	log.Println("Ready! Media controls on keys 5-6, weather on key 1")
+	log.Println("Ready! Media on left, weather on right")
 
 	// Wait for shutdown signal or error
 	select {
