@@ -11,6 +11,7 @@ require (
 
 require (
 	github.com/ebitengine/purego v0.8.4 // indirect
+	github.com/prashantgupta24/mac-sleep-notifier v1.0.1 // indirect
 	golang.org/x/net v0.0.0-20211118161319-6a13c67c3ce4 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	rafaelmartins.com/p/usbhid v0.0.0-20250616003425-c818f1cb579e // indirect

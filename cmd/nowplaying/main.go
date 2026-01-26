@@ -14,6 +14,7 @@ import (
 	"github.com/phinze/gatolab/internal/module"
 	"github.com/phinze/gatolab/internal/modules/nowplaying"
 	"github.com/phinze/gatolab/internal/modules/weather"
+	"github.com/prashantgupta24/mac-sleep-notifier/notifier"
 	"rafaelmartins.com/p/streamdeck"
 )
 
@@ -39,6 +40,21 @@ func main() {
 		cancel()
 	}()
 
+	// Start sleep/wake notifier
+	sleepCh := notifier.GetInstance().Start()
+	wakeCh := make(chan struct{}, 1)
+	go func() {
+		for activity := range sleepCh {
+			if activity.Type == notifier.Awake {
+				log.Println("System wake detected")
+				select {
+				case wakeCh <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+
 	// Main device loop - wait for device, run, repeat on disconnect
 	for {
 		device := waitForDevice(ctx)
@@ -47,7 +63,7 @@ func main() {
 			break
 		}
 
-		runWithDevice(ctx, device)
+		runWithDevice(ctx, device, wakeCh)
 
 		// Check if we should exit or wait for reconnect
 		select {
@@ -88,8 +104,8 @@ func waitForDevice(ctx context.Context) *streamdeck.Device {
 	}
 }
 
-// runWithDevice runs the coordinator with the given device until disconnect or context cancel.
-func runWithDevice(ctx context.Context, device *streamdeck.Device) {
+// runWithDevice runs the coordinator with the given device until disconnect, wake, or context cancel.
+func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan struct{}) {
 	log.Printf("Connected to: %s", device.GetModelName())
 
 	// Set brightness and clear keys
@@ -124,7 +140,7 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device) {
 
 	log.Println("Ready! Media on left, weather on right")
 
-	// Wait for parent context cancel or device error
+	// Wait for parent context cancel, device error, or system wake
 	select {
 	case <-ctx.Done():
 		log.Println("Shutting down...")
@@ -132,6 +148,8 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device) {
 		if err != nil {
 			log.Printf("Device disconnected: %v", err)
 		}
+	case <-wakeCh:
+		log.Println("Reconnecting device after wake...")
 	}
 
 	// Stop coordinator with timeout
