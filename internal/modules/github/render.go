@@ -59,6 +59,33 @@ func (m *Module) initFonts() error {
 		return fmt.Errorf("failed to create number face: %w", err)
 	}
 
+	m.overlayFace, err = opentype.NewFace(ttBold, &opentype.FaceOptions{
+		Size:    10,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create overlay face: %w", err)
+	}
+
+	m.stripTitleFace, err = opentype.NewFace(ttBold, &opentype.FaceOptions{
+		Size:    18,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create strip title face: %w", err)
+	}
+
+	m.stripLabelFace, err = opentype.NewFace(ttBold, &opentype.FaceOptions{
+		Size:    14,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create strip label face: %w", err)
+	}
+
 	return nil
 }
 
@@ -152,4 +179,187 @@ func renderSVGIcon(svgContent string, size int, iconColor color.Color) image.Ima
 	icon.Draw(raster, 1.0)
 
 	return img
+}
+
+// renderPRKey renders a single PR on a key.
+func (m *Module) renderPRKey(pr PRInfo) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, keySize, keySize))
+
+	// Background color based on status
+	var bgColor color.Color
+	switch pr.Status {
+	case PRStatusApproved:
+		bgColor = color.RGBA{30, 60, 40, 255} // Dark green
+	case PRStatusChanges:
+		bgColor = color.RGBA{60, 40, 30, 255} // Dark orange
+	default:
+		bgColor = color.RGBA{50, 50, 40, 255} // Dark yellow
+	}
+	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
+
+	// Status indicator color
+	var statusColor color.Color
+	switch pr.Status {
+	case PRStatusApproved:
+		statusColor = colorGreen
+	case PRStatusChanges:
+		statusColor = colorOrange
+	default:
+		statusColor = colorYellow
+	}
+
+	// Draw status indicator bar at top
+	barRect := image.Rect(0, 0, keySize, 4)
+	draw.Draw(img, barRect, &image.Uniform{statusColor}, image.Point{}, draw.Src)
+
+	// Draw PR number
+	prNum := fmt.Sprintf("#%d", pr.Number)
+	m.drawText(img, prNum, 4, 16, m.labelFace, statusColor)
+
+	// Draw repo name (truncated)
+	repo := pr.Repo
+	// Get just the repo part (after /)
+	if idx := strings.LastIndex(repo, "/"); idx != -1 {
+		repo = repo[idx+1:]
+	}
+	if len(repo) > 10 {
+		repo = repo[:9] + "."
+	}
+	m.drawText(img, repo, 4, 28, m.labelFace, colorDimGray)
+
+	// Draw title (wrapped across multiple lines)
+	title := pr.Title
+	lines := wrapText(title, 11) // ~11 chars per line at this font size
+	y := 42
+	for i, line := range lines {
+		if i >= 3 { // Max 3 lines
+			break
+		}
+		m.drawText(img, line, 4, y, m.overlayFace, colorWhite)
+		y += 11
+	}
+
+	return img
+}
+
+// renderEmptyKey renders an empty key for the overlay.
+func (m *Module) renderEmptyKey() image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, keySize, keySize))
+	draw.Draw(img, img.Bounds(), &image.Uniform{colorKeyBg}, image.Point{}, draw.Src)
+	return img
+}
+
+// renderOverlayStrip renders the touch strip for the PR overlay.
+func (m *Module) renderOverlayStrip() image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, 800, 100))
+
+	// Dark background
+	draw.Draw(img, img.Bounds(), &image.Uniform{color.RGBA{30, 30, 30, 255}}, image.Point{}, draw.Src)
+
+	prList := m.getPRList()
+	if len(prList) == 0 {
+		m.drawTextCentered(img, "No open PRs", 400, 55, m.stripTitleFace, colorDimGray)
+		return img
+	}
+
+	// Show up to 4 PRs in a single row with larger text
+	// Each PR gets 200px width
+	const prWidth = 200
+
+	for i, pr := range prList {
+		if i >= 4 {
+			break
+		}
+		x := i * prWidth
+		m.drawStripPR(img, pr, x)
+	}
+
+	return img
+}
+
+// drawStripPR draws a single PR entry on the strip.
+func (m *Module) drawStripPR(img *image.RGBA, pr PRInfo, x int) {
+	// Status color
+	var statusColor color.Color
+	switch pr.Status {
+	case PRStatusApproved:
+		statusColor = colorGreen
+	case PRStatusChanges:
+		statusColor = colorOrange
+	default:
+		statusColor = colorYellow
+	}
+
+	// Draw status bar on left edge
+	barRect := image.Rect(x+4, 15, x+8, 85)
+	draw.Draw(img, barRect, &image.Uniform{statusColor}, image.Point{}, draw.Src)
+
+	// Draw repo/number (14px)
+	repo := pr.Repo
+	if idx := strings.LastIndex(repo, "/"); idx != -1 {
+		repo = repo[idx+1:]
+	}
+	if len(repo) > 10 {
+		repo = repo[:9] + "."
+	}
+	label := fmt.Sprintf("%s #%d", repo, pr.Number)
+	m.drawText(img, label, x+16, 35, m.stripLabelFace, statusColor)
+
+	// Draw title (18px, truncated)
+	title := pr.Title
+	if len(title) > 18 {
+		title = title[:17] + "..."
+	}
+	m.drawText(img, title, x+16, 60, m.stripTitleFace, colorWhite)
+}
+
+// drawTextCentered draws text horizontally centered at the given position.
+func (m *Module) drawTextCentered(img *image.RGBA, text string, centerX, y int, face font.Face, col color.Color) {
+	width := font.MeasureString(face, text).Ceil()
+	x := centerX - width/2
+
+	d := &font.Drawer{
+		Dst:  img,
+		Src:  image.NewUniform(col),
+		Face: face,
+		Dot:  fixed.Point26_6{X: fixed.I(x), Y: fixed.I(y)},
+	}
+	d.DrawString(text)
+}
+
+// wrapText wraps text to fit within a given character width.
+func wrapText(text string, maxChars int) []string {
+	if len(text) <= maxChars {
+		return []string{text}
+	}
+
+	var lines []string
+	words := strings.Fields(text)
+	var currentLine string
+
+	for _, word := range words {
+		if len(currentLine) == 0 {
+			if len(word) > maxChars {
+				// Word too long, truncate
+				lines = append(lines, word[:maxChars-1]+".")
+				continue
+			}
+			currentLine = word
+		} else if len(currentLine)+1+len(word) <= maxChars {
+			currentLine += " " + word
+		} else {
+			lines = append(lines, currentLine)
+			if len(word) > maxChars {
+				currentLine = word[:maxChars-1] + "."
+			} else {
+				currentLine = word
+			}
+		}
+	}
+
+	if len(currentLine) > 0 {
+		lines = append(lines, currentLine)
+	}
+
+	return lines
 }

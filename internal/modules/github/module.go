@@ -22,15 +22,26 @@ type Module struct {
 	enabled bool
 
 	// State
-	mu    sync.RWMutex
-	stats PRStats
+	mu     sync.RWMutex
+	stats  PRStats
+	prList []PRInfo
+
+	// Overlay state
+	overlayActive bool
+	overlayExpiry time.Time
 
 	// Fonts
-	labelFace  font.Face
-	numberFace font.Face
+	labelFace      font.Face
+	numberFace     font.Face
+	overlayFace    font.Face
+	stripTitleFace font.Face
+	stripLabelFace font.Face
 
 	// Resources
 	resources module.Resources
+
+	// Context for fetching
+	ctx context.Context
 }
 
 // New creates a new GitHub module.
@@ -53,6 +64,7 @@ func (m *Module) Init(ctx context.Context, res module.Resources) error {
 	}
 
 	m.resources = res
+	m.ctx = ctx
 
 	// Create API client (uses gh CLI token)
 	client, err := NewClient()
@@ -108,8 +120,18 @@ func (m *Module) fetchStats(ctx context.Context) {
 		return
 	}
 
+	// Also fetch PR list for overlay
+	prList, err := m.client.GetMyPRList(ctx)
+	if err != nil {
+		log.Printf("Failed to fetch GitHub PR list: %v", err)
+		// Continue with stats even if list fails
+	}
+
 	m.mu.Lock()
 	m.stats = stats
+	if prList != nil {
+		m.prList = prList
+	}
 	m.mu.Unlock()
 }
 
@@ -118,6 +140,13 @@ func (m *Module) getStats() PRStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.stats
+}
+
+// getPRList returns the current PR list.
+func (m *Module) getPRList() []PRInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.prList
 }
 
 // RenderKeys returns images for the module's keys.
@@ -143,6 +172,17 @@ func (m *Module) RenderStrip() image.Image {
 
 // HandleKey processes key events.
 func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
+	// Only trigger on press (not release)
+	if !event.Pressed {
+		return nil
+	}
+
+	// Show overlay for 5 seconds
+	m.mu.Lock()
+	m.overlayActive = true
+	m.overlayExpiry = time.Now().Add(5 * time.Second)
+	m.mu.Unlock()
+
 	return nil
 }
 
@@ -154,4 +194,54 @@ func (m *Module) HandleDial(id module.DialID, event module.DialEvent) error {
 // HandleStripTouch processes touch strip events.
 func (m *Module) HandleStripTouch(event module.TouchStripEvent) error {
 	return nil
+}
+
+// IsOverlayActive returns true if the PR list overlay is visible.
+func (m *Module) IsOverlayActive() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if !m.overlayActive {
+		return false
+	}
+
+	// Check if overlay has expired
+	if time.Now().After(m.overlayExpiry) {
+		// Need to acquire write lock to update
+		m.mu.RUnlock()
+		m.mu.Lock()
+		m.overlayActive = false
+		m.mu.Unlock()
+		m.mu.RLock()
+		return false
+	}
+
+	return true
+}
+
+// RenderOverlayKeys returns images for all 8 keys showing PR list.
+func (m *Module) RenderOverlayKeys() map[module.KeyID]image.Image {
+	keys := make(map[module.KeyID]image.Image)
+	prList := m.getPRList()
+
+	// Render up to 8 PRs across all keys
+	allKeys := []module.KeyID{
+		module.Key1, module.Key2, module.Key3, module.Key4,
+		module.Key5, module.Key6, module.Key7, module.Key8,
+	}
+
+	for i, keyID := range allKeys {
+		if i < len(prList) {
+			keys[keyID] = m.renderPRKey(prList[i])
+		} else {
+			keys[keyID] = m.renderEmptyKey()
+		}
+	}
+
+	return keys
+}
+
+// RenderOverlayStrip returns the touch strip image for the overlay.
+func (m *Module) RenderOverlayStrip() image.Image {
+	return m.renderOverlayStrip()
 }

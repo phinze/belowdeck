@@ -38,6 +38,9 @@ type Coordinator struct {
 
 	// State tracking
 	mu sync.RWMutex
+
+	// Overlay state tracking
+	overlayWasActive bool
 }
 
 // New creates a new Coordinator for the given device.
@@ -257,6 +260,33 @@ func (c *Coordinator) renderLoop() {
 
 // renderKeys collects key images from all modules and applies them to the device.
 func (c *Coordinator) renderKeys() {
+	// Check for active overlays first
+	overlayActive := false
+	for _, m := range c.modules {
+		if c.failedModules[m] {
+			continue
+		}
+		if overlay, ok := m.(module.OverlayProvider); ok && overlay.IsOverlayActive() {
+			overlayActive = true
+			// Overlay takes over all keys
+			keyImages := overlay.RenderOverlayKeys()
+			for keyID, img := range keyImages {
+				if img != nil {
+					c.device.SetKeyImage(keyID.ToStreamdeck(), img)
+				}
+			}
+			c.overlayWasActive = true
+			return
+		}
+	}
+
+	// If overlay just became inactive, clear all keys first
+	if c.overlayWasActive && !overlayActive {
+		c.clearAllKeys()
+		c.overlayWasActive = false
+	}
+
+	// Normal rendering
 	for _, m := range c.modules {
 		if c.failedModules[m] {
 			continue
@@ -274,6 +304,21 @@ func (c *Coordinator) renderKeys() {
 func (c *Coordinator) renderStrip() {
 	if c.stripRect.Empty() {
 		return
+	}
+
+	// Check for active overlays first
+	for _, m := range c.modules {
+		if c.failedModules[m] {
+			continue
+		}
+		if overlay, ok := m.(module.OverlayProvider); ok && overlay.IsOverlayActive() {
+			// Overlay takes over the strip
+			stripImg := overlay.RenderOverlayStrip()
+			if stripImg != nil {
+				c.device.SetTouchStripImage(stripImg)
+			}
+			return
+		}
 	}
 
 	// Create composite strip image
@@ -306,4 +351,23 @@ func (c *Coordinator) renderStrip() {
 // Modules can use this to query device capabilities like key size.
 func (c *Coordinator) Device() *streamdeck.Device {
 	return c.device
+}
+
+// clearAllKeys sets all keys to black.
+func (c *Coordinator) clearAllKeys() {
+	allKeys := []module.KeyID{
+		module.Key1, module.Key2, module.Key3, module.Key4,
+		module.Key5, module.Key6, module.Key7, module.Key8,
+	}
+
+	// Create a black image for clearing
+	keyRect, err := c.device.GetKeyImageRectangle()
+	if err != nil {
+		return
+	}
+	blackImg := image.NewRGBA(keyRect)
+
+	for _, keyID := range allKeys {
+		c.device.SetKeyImage(keyID.ToStreamdeck(), blackImg)
+	}
 }

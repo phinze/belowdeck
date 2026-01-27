@@ -18,6 +18,24 @@ type PRStats struct {
 	ChangesRequested int
 }
 
+// PRStatus represents the review status of a PR.
+type PRStatus string
+
+const (
+	PRStatusWaiting PRStatus = "waiting"
+	PRStatusApproved PRStatus = "approved"
+	PRStatusChanges  PRStatus = "changes"
+)
+
+// PRInfo holds information about a single PR.
+type PRInfo struct {
+	Title  string
+	Repo   string
+	Number int
+	Status PRStatus
+	URL    string
+}
+
 // Client is a GitHub API client.
 type Client struct {
 	token      string
@@ -130,9 +148,9 @@ func (c *Client) getAuthenticatedUser(ctx context.Context) (string, error) {
 
 // searchPRCount searches for PRs matching a query and returns the count.
 func (c *Client) searchPRCount(ctx context.Context, query string) (int, error) {
-	url := "https://api.github.com/search/issues?per_page=1&q=" + url.QueryEscape(query)
+	apiURL := "https://api.github.com/search/issues?per_page=1&q=" + url.QueryEscape(query)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -158,4 +176,101 @@ func (c *Client) searchPRCount(ctx context.Context, query string) (int, error) {
 	}
 
 	return result.TotalCount, nil
+}
+
+// GetMyPRList fetches a list of PRs with details.
+func (c *Client) GetMyPRList(ctx context.Context) ([]PRInfo, error) {
+	username, err := c.getAuthenticatedUser(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get username: %w", err)
+	}
+
+	type result struct {
+		status PRStatus
+		prs    []PRInfo
+		err    error
+	}
+	results := make(chan result, 3)
+
+	queries := []struct {
+		status PRStatus
+		query  string
+	}{
+		{PRStatusWaiting, fmt.Sprintf("is:pr author:%s is:open review:required", username)},
+		{PRStatusApproved, fmt.Sprintf("is:pr author:%s is:open review:approved", username)},
+		{PRStatusChanges, fmt.Sprintf("is:pr author:%s is:open review:changes_requested", username)},
+	}
+
+	for _, q := range queries {
+		go func(status PRStatus, query string) {
+			prs, err := c.searchPRs(ctx, query, status)
+			results <- result{status, prs, err}
+		}(q.status, q.query)
+	}
+
+	var allPRs []PRInfo
+	for i := 0; i < 3; i++ {
+		r := <-results
+		if r.err != nil {
+			return nil, r.err
+		}
+		allPRs = append(allPRs, r.prs...)
+	}
+
+	return allPRs, nil
+}
+
+// searchPRs searches for PRs matching a query and returns details.
+func (c *Client) searchPRs(ctx context.Context, query string, status PRStatus) ([]PRInfo, error) {
+	apiURL := "https://api.github.com/search/issues?per_page=10&q=" + url.QueryEscape(query)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: %s", resp.Status)
+	}
+
+	var searchResult struct {
+		Items []struct {
+			Title         string `json:"title"`
+			Number        int    `json:"number"`
+			HTMLURL       string `json:"html_url"`
+			RepositoryURL string `json:"repository_url"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&searchResult); err != nil {
+		return nil, err
+	}
+
+	var prs []PRInfo
+	for _, item := range searchResult.Items {
+		// Extract repo name from repository URL
+		// https://api.github.com/repos/owner/repo -> owner/repo
+		repoName := item.RepositoryURL
+		if idx := strings.Index(repoName, "/repos/"); idx != -1 {
+			repoName = repoName[idx+7:]
+		}
+
+		prs = append(prs, PRInfo{
+			Title:  item.Title,
+			Repo:   repoName,
+			Number: item.Number,
+			Status: status,
+			URL:    item.HTMLURL,
+		})
+	}
+
+	return prs, nil
 }
