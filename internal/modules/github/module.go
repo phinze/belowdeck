@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/module"
 	"golang.org/x/image/font"
-	"rafaelmartins.com/p/streamdeck"
 )
 
 // OverlayType indicates which overlay is currently active.
@@ -27,7 +27,7 @@ const (
 type Module struct {
 	module.BaseModule
 
-	device  *streamdeck.Device
+	device  device.Device
 	client  *Client
 	enabled bool
 
@@ -59,10 +59,10 @@ type Module struct {
 }
 
 // New creates a new GitHub module.
-func New(device *streamdeck.Device) *Module {
+func New(dev device.Device) *Module {
 	return &Module{
 		BaseModule: module.NewBaseModule("github"),
-		device:     device,
+		device:     dev,
 	}
 }
 

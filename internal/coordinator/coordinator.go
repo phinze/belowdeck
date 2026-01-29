@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/module"
-	"rafaelmartins.com/p/streamdeck"
 )
 
 // Coordinator manages the lifecycle of modules and routes events to them.
 type Coordinator struct {
-	device  *streamdeck.Device
+	device  device.Device
 	modules []module.Module
 
 	// Resource tracking
@@ -44,9 +44,9 @@ type Coordinator struct {
 }
 
 // New creates a new Coordinator for the given device.
-func New(device *streamdeck.Device) *Coordinator {
+func New(dev device.Device) *Coordinator {
 	return &Coordinator{
-		device:          device,
+		device:          dev,
 		modules:         make([]module.Module, 0),
 		moduleResources: make(map[module.Module]module.Resources),
 		keyOwners:       make(map[module.KeyID]module.Module),
@@ -170,7 +170,7 @@ func (c *Coordinator) setupEventHandlers() {
 	for _, keyID := range allKeys {
 		key := keyID
 		owner := c.keyOwners[key] // may be nil for unowned keys
-		c.device.AddKeyHandler(key.ToStreamdeck(), func(d *streamdeck.Device, k *streamdeck.Key) error {
+		c.device.AddKeyHandler(device.KeyID(key), func(d device.Device, k device.Key) error {
 			// Check for active overlay first
 			if overlay := c.getActiveOverlay(); overlay != nil {
 				// Route to overlay handler
@@ -204,7 +204,7 @@ func (c *Coordinator) setupEventHandlers() {
 	for dialID, m := range c.dialOwners {
 		dial := dialID
 		mod := m
-		c.device.AddDialRotateHandler(dial.ToStreamdeck(), func(d *streamdeck.Device, di *streamdeck.Dial, delta int8) error {
+		c.device.AddDialRotateHandler(device.DialID(dial), func(d device.Device, di device.Dial, delta int8) error {
 			if c.failedModules[mod] {
 				return nil
 			}
@@ -220,7 +220,7 @@ func (c *Coordinator) setupEventHandlers() {
 	for dialID, m := range c.dialOwners {
 		dial := dialID
 		mod := m
-		c.device.AddDialSwitchHandler(dial.ToStreamdeck(), func(d *streamdeck.Device, di *streamdeck.Dial) error {
+		c.device.AddDialSwitchHandler(device.DialID(dial), func(d device.Device, di device.Dial) error {
 			if c.failedModules[mod] {
 				return nil
 			}
@@ -239,8 +239,8 @@ func (c *Coordinator) setupEventHandlers() {
 
 	// Touch strip handler - route based on X coordinate
 	if c.device.GetTouchStripSupported() {
-		c.device.AddTouchStripTouchHandler(func(d *streamdeck.Device, touchType streamdeck.TouchStripTouchType, point image.Point) error {
-			event := module.TouchStripEventFromTap(touchType, point)
+		c.device.AddTouchStripTouchHandler(func(d device.Device, touchType device.TouchStripTouchType, point image.Point) error {
+			event := module.TouchStripEventFromDeviceTap(touchType, point)
 			// Check for active overlay first
 			if overlay := c.getActiveOverlay(); overlay != nil {
 				return overlay.HandleOverlayStripTouch(event)
@@ -248,7 +248,7 @@ func (c *Coordinator) setupEventHandlers() {
 			return c.routeStripEvent(event)
 		})
 
-		c.device.AddTouchStripSwipeHandler(func(d *streamdeck.Device, origin, dest image.Point) error {
+		c.device.AddTouchStripSwipeHandler(func(d device.Device, origin, dest image.Point) error {
 			event := module.TouchStripEventFromSwipe(origin, dest)
 			// Check for active overlay first
 			if overlay := c.getActiveOverlay(); overlay != nil {
@@ -311,7 +311,7 @@ func (c *Coordinator) renderKeys() {
 			keyImages := overlay.RenderOverlayKeys()
 			for keyID, img := range keyImages {
 				if img != nil {
-					c.device.SetKeyImage(keyID.ToStreamdeck(), img)
+					c.device.SetKeyImage(device.KeyID(keyID), img)
 				}
 			}
 			c.overlayWasActive = true
@@ -333,7 +333,7 @@ func (c *Coordinator) renderKeys() {
 		keyImages := m.RenderKeys()
 		for keyID, img := range keyImages {
 			if img != nil {
-				c.device.SetKeyImage(keyID.ToStreamdeck(), img)
+				c.device.SetKeyImage(device.KeyID(keyID), img)
 			}
 		}
 	}
@@ -386,9 +386,9 @@ func (c *Coordinator) renderStrip() {
 	c.device.SetTouchStripImage(composite)
 }
 
-// Device returns the underlying streamdeck device.
+// Device returns the underlying device.
 // Modules can use this to query device capabilities like key size.
-func (c *Coordinator) Device() *streamdeck.Device {
+func (c *Coordinator) Device() device.Device {
 	return c.device
 }
 
@@ -407,6 +407,6 @@ func (c *Coordinator) clearAllKeys() {
 	blackImg := image.NewRGBA(keyRect)
 
 	for _, keyID := range allKeys {
-		c.device.SetKeyImage(keyID.ToStreamdeck(), blackImg)
+		c.device.SetKeyImage(device.KeyID(keyID), blackImg)
 	}
 }

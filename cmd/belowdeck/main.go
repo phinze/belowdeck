@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"image"
 	"log"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/phinze/belowdeck/internal/coordinator"
+	"github.com/phinze/belowdeck/internal/device"
+	"github.com/phinze/belowdeck/internal/device/emulator"
 	"github.com/phinze/belowdeck/internal/module"
 	"github.com/phinze/belowdeck/internal/modules/github"
 	"github.com/phinze/belowdeck/internal/modules/homeassistant"
@@ -20,7 +23,11 @@ import (
 	"rafaelmartins.com/p/streamdeck"
 )
 
+var emulatorMode = flag.Bool("emulator", false, "Run with GUI emulator instead of hardware")
+
 func main() {
+	flag.Parse()
+
 	log.Println("=== Stream Deck Daemon ===")
 	log.Println("Press Ctrl+C to exit")
 
@@ -42,7 +49,25 @@ func main() {
 		cancel()
 	}()
 
-	// Start sleep/wake notifier
+	// Emulator mode - run once and exit
+	if *emulatorMode {
+		log.Println("Running in emulator mode")
+		emu := emulator.New()
+		if err := emu.Open(); err != nil {
+			log.Fatalf("Failed to open emulator: %v", err)
+		}
+
+		// Start coordinator in background goroutine
+		go runWithDevice(ctx, emu, nil)
+
+		// Run GUI on main thread (required for macOS)
+		if err := emu.RunGUI(); err != nil {
+			log.Printf("Emulator GUI error: %v", err)
+		}
+		return
+	}
+
+	// Hardware mode - start sleep/wake notifier and run device loop
 	sleepCh := notifier.GetInstance().Start()
 	wakeCh := make(chan struct{}, 1)
 	go func() {
@@ -59,13 +84,13 @@ func main() {
 
 	// Main device loop - wait for device, run, repeat on disconnect
 	for {
-		device := waitForDevice(ctx)
-		if device == nil {
+		dev := waitForHardwareDevice(ctx)
+		if dev == nil {
 			// Context cancelled
 			break
 		}
 
-		runWithDevice(ctx, device, wakeCh)
+		runWithDevice(ctx, dev, wakeCh)
 
 		// Check if we should exit or wait for reconnect
 		select {
@@ -78,18 +103,18 @@ func main() {
 	}
 }
 
-// waitForDevice polls for a Stream Deck device until one is available.
+// waitForHardwareDevice polls for a Stream Deck device until one is available.
 // Uses polling since macOS doesn't have a simple USB hotplug event API.
-func waitForDevice(ctx context.Context) *streamdeck.Device {
+func waitForHardwareDevice(ctx context.Context) device.Device {
 	// First, try to get an already-connected device
-	device, err := streamdeck.GetDevice("")
+	dev, err := streamdeck.GetDevice("")
 	if err != nil {
 		log.Printf("GetDevice error: %v", err)
 	} else {
-		if err := device.Open(); err != nil {
+		if err := dev.Open(); err != nil {
 			log.Printf("Device found but Open failed: %v", err)
 		} else {
-			return device
+			return device.NewHardware(dev)
 		}
 	}
 
@@ -102,52 +127,52 @@ func waitForDevice(ctx context.Context) *streamdeck.Device {
 		case <-time.After(2 * time.Second):
 		}
 
-		device, err := streamdeck.GetDevice("")
+		dev, err := streamdeck.GetDevice("")
 		if err != nil {
 			// Only log occasionally to avoid spam
 			continue
 		}
-		if err := device.Open(); err != nil {
+		if err := dev.Open(); err != nil {
 			log.Printf("Device found but Open failed: %v", err)
 			continue
 		}
 		log.Println("Device connected!")
-		return device
+		return device.NewHardware(dev)
 	}
 }
 
 // runWithDevice runs the coordinator with the given device until disconnect, wake, or context cancel.
-func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan struct{}) {
-	log.Printf("Connected to: %s", device.GetModelName())
+func runWithDevice(ctx context.Context, dev device.Device, wakeCh <-chan struct{}) {
+	log.Printf("Connected to: %s", dev.GetModelName())
 
 	// Set brightness and clear keys
-	device.SetBrightness(80)
-	device.ForEachKey(func(key streamdeck.KeyID) error {
-		return device.ClearKey(key)
+	dev.SetBrightness(80)
+	dev.ForEachKey(func(key device.KeyID) error {
+		return dev.ClearKey(key)
 	})
 
 	// Create coordinator and modules fresh for each connection
-	coord := coordinator.New(device)
+	coord := coordinator.New(dev)
 
-	np := nowplaying.New(device)
+	np := nowplaying.New(dev)
 	coord.RegisterModule(np, module.Resources{
 		Keys:      []module.KeyID{module.Key5, module.Key6},
 		StripRect: image.Rect(0, 0, 400, 100),
 		Dials:     []module.DialID{module.Dial1, module.Dial2},
 	})
 
-	w := weather.New(device)
+	w := weather.New(dev)
 	coord.RegisterModule(w, module.Resources{
 		StripRect: image.Rect(400, 0, 800, 100),
 	})
 
-	ha := homeassistant.New(device)
+	ha := homeassistant.New(dev)
 	coord.RegisterModule(ha, module.Resources{
 		Keys:  []module.KeyID{module.Key1, module.Key2},
 		Dials: []module.DialID{module.Dial4},
 	})
 
-	gh := github.New(device)
+	gh := github.New(dev)
 	coord.RegisterModule(gh, module.Resources{
 		Keys: []module.KeyID{module.Key3, module.Key4},
 	})
@@ -194,7 +219,7 @@ func runWithDevice(ctx context.Context, device *streamdeck.Device, wakeCh <-chan
 	// where we try to reopen before close completes
 	closeDone := make(chan struct{})
 	go func() {
-		device.Close()
+		dev.Close()
 		close(closeDone)
 	}()
 

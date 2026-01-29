@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/module"
 	"golang.org/x/image/font"
-	"rafaelmartins.com/p/streamdeck"
 )
 
 // Config holds the weather module configuration.
@@ -27,7 +27,7 @@ type Config struct {
 type Module struct {
 	module.BaseModule
 
-	device *streamdeck.Device
+	device device.Device
 	config Config
 
 	// State
@@ -71,10 +71,10 @@ func (s *weatherState) update(current CurrentWeather, daily DailyForecast, preci
 }
 
 // New creates a new Weather module.
-func New(device *streamdeck.Device) *Module {
+func New(dev device.Device) *Module {
 	return &Module{
 		BaseModule: module.NewBaseModule("weather"),
-		device:     device,
+		device:     dev,
 		state:      newWeatherState(),
 	}
 }

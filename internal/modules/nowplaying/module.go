@@ -8,16 +8,16 @@ import (
 	"os/exec"
 	"sync"
 
+	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/module"
 	"golang.org/x/image/font"
-	"rafaelmartins.com/p/streamdeck"
 )
 
 // Module implements the nowplaying media control module.
 type Module struct {
 	module.BaseModule
 
-	device *streamdeck.Device
+	device device.Device
 
 	// State
 	liveState     *liveState
@@ -35,10 +35,10 @@ type Module struct {
 }
 
 // New creates a new NowPlaying module.
-func New(device *streamdeck.Device) *Module {
+func New(dev device.Device) *Module {
 	return &Module{
 		BaseModule: module.NewBaseModule("nowplaying"),
-		device:     device,
+		device:     dev,
 		liveState:  newLiveState(),
 	}
 }

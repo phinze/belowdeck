@@ -10,16 +10,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/module"
 	"golang.org/x/image/font"
-	"rafaelmartins.com/p/streamdeck"
 )
 
 // Config holds the Home Assistant module configuration.
 type Config struct {
-	URL              string
-	Token            string
-	RingLightEntity  string
+	URL               string
+	Token             string
+	RingLightEntity   string
 	OfficeLightEntity string
 }
 
@@ -27,7 +27,7 @@ type Config struct {
 type Module struct {
 	module.BaseModule
 
-	device  *streamdeck.Device
+	device  device.Device
 	config  Config
 	client  *Client
 	enabled bool
@@ -45,10 +45,10 @@ type Module struct {
 }
 
 // New creates a new Home Assistant module.
-func New(device *streamdeck.Device) *Module {
+func New(dev device.Device) *Module {
 	return &Module{
 		BaseModule: module.NewBaseModule("homeassistant"),
-		device:     device,
+		device:     dev,
 	}
 }
 

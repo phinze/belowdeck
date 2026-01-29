@@ -3,6 +3,7 @@ package module
 import (
 	"image"
 
+	"github.com/phinze/belowdeck/internal/device"
 	"rafaelmartins.com/p/streamdeck"
 )
 
@@ -33,6 +34,24 @@ func TouchStripEventFromTap(touchType streamdeck.TouchStripTouchType, point imag
 	case streamdeck.TOUCH_STRIP_TOUCH_TYPE_SHORT:
 		eventType = TouchTap
 	case streamdeck.TOUCH_STRIP_TOUCH_TYPE_LONG:
+		eventType = TouchLongTap
+	default:
+		eventType = TouchTap
+	}
+
+	return TouchStripEvent{
+		Type:  eventType,
+		Point: point,
+	}
+}
+
+// TouchStripEventFromDeviceTap creates a TouchStripEvent from a device tap.
+func TouchStripEventFromDeviceTap(touchType device.TouchStripTouchType, point image.Point) TouchStripEvent {
+	var eventType TouchStripEventType
+	switch touchType {
+	case device.TOUCH_STRIP_TOUCH_TYPE_SHORT:
+		eventType = TouchTap
+	case device.TOUCH_STRIP_TOUCH_TYPE_LONG:
 		eventType = TouchLongTap
 	default:
 		eventType = TouchTap
