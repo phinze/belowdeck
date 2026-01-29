@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"image"
 	"log"
 	"os"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/phinze/belowdeck/internal/coordinator"
 	"github.com/phinze/belowdeck/internal/device"
-	"github.com/phinze/belowdeck/internal/device/emulator"
 	"github.com/phinze/belowdeck/internal/module"
 	"github.com/phinze/belowdeck/internal/modules/github"
 	"github.com/phinze/belowdeck/internal/modules/homeassistant"
@@ -23,11 +21,7 @@ import (
 	"rafaelmartins.com/p/streamdeck"
 )
 
-var emulatorMode = flag.Bool("emulator", false, "Run with GUI emulator instead of hardware")
-
 func main() {
-	flag.Parse()
-
 	log.Println("=== Stream Deck Daemon ===")
 	log.Println("Press Ctrl+C to exit")
 
@@ -49,25 +43,7 @@ func main() {
 		cancel()
 	}()
 
-	// Emulator mode - run once and exit
-	if *emulatorMode {
-		log.Println("Running in emulator mode")
-		emu := emulator.New()
-		if err := emu.Open(); err != nil {
-			log.Fatalf("Failed to open emulator: %v", err)
-		}
-
-		// Start coordinator in background goroutine
-		go runWithDevice(ctx, emu, nil)
-
-		// Run GUI on main thread (required for macOS)
-		if err := emu.RunGUI(); err != nil {
-			log.Printf("Emulator GUI error: %v", err)
-		}
-		return
-	}
-
-	// Hardware mode - start sleep/wake notifier and run device loop
+	// Start sleep/wake notifier and run device loop
 	sleepCh := notifier.GetInstance().Start()
 	wakeCh := make(chan struct{}, 1)
 	go func() {
