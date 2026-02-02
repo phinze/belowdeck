@@ -60,10 +60,19 @@ func main() {
 
 	// Main device loop - wait for device, run, repeat on disconnect
 	for {
-		dev := waitForHardwareDevice(ctx)
+		dev := waitForHardwareDevice(ctx, wakeCh)
 		if dev == nil {
 			// Context cancelled
 			break
+		}
+
+		// Check context before starting - avoid race where device connects after shutdown requested
+		select {
+		case <-ctx.Done():
+			log.Println("Exiting...")
+			dev.Close()
+			return
+		default:
 		}
 
 		runWithDevice(ctx, dev, wakeCh)
@@ -81,7 +90,8 @@ func main() {
 
 // waitForHardwareDevice polls for a Stream Deck device until one is available.
 // Uses polling since macOS doesn't have a simple USB hotplug event API.
-func waitForHardwareDevice(ctx context.Context) device.Device {
+// Wake signals trigger immediate retry instead of waiting for the poll interval.
+func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}) device.Device {
 	// First, try to get an already-connected device
 	dev, err := streamdeck.GetDevice("")
 	if err != nil {
@@ -100,6 +110,8 @@ func waitForHardwareDevice(ctx context.Context) device.Device {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-wakeCh:
+			log.Println("Wake signal received, checking for device...")
 		case <-time.After(2 * time.Second):
 		}
 
