@@ -20,5 +20,5 @@ require (
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
-	rafaelmartins.com/p/usbhid v0.0.0-20251225062232-1accdc9b433e // indirect
+	rafaelmartins.com/p/usbhid v0.0.0-20260201162308-12aff85c336f // indirect
 )
