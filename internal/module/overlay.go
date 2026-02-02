@@ -21,4 +21,8 @@ type OverlayProvider interface {
 
 	// HandleOverlayStripTouch processes touch strip events when the overlay is active.
 	HandleOverlayStripTouch(event TouchStripEvent) error
+
+	// HandleOverlayDial processes dial events when the overlay is active.
+	// This allows the overlay to respond to dial rotation and clicks.
+	HandleOverlayDial(id DialID, event DialEvent) error
 }

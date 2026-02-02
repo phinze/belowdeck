@@ -105,10 +105,21 @@ func (m *Module) renderPRStatsButton() image.Image {
 	// Background
 	draw.Draw(img, img.Bounds(), &image.Uniform{colorKeyBg}, image.Point{}, draw.Src)
 
+	// Determine top row content based on what's present
+	// Priority: CI failures (red) > Drafts (gray) > Icon
 	var rowY int
-	if stats.CIFailed > 0 {
+	if stats.CIFailed > 0 && stats.Draft > 0 {
+		// Show both fail and draft rows at top
+		m.drawStatRow(img, 10, "Fail", stats.CIFailed, colorRed)
+		m.drawStatRow(img, 22, "Draft", stats.Draft, colorDimGray)
+		rowY = 36
+	} else if stats.CIFailed > 0 {
 		// Show fail row at top instead of icon
 		m.drawStatRow(img, 14, "Fail", stats.CIFailed, colorRed)
+		rowY = 28
+	} else if stats.Draft > 0 {
+		// Show draft row at top instead of icon
+		m.drawStatRow(img, 14, "Draft", stats.Draft, colorDimGray)
 		rowY = 28
 	} else {
 		// Draw send icon (outbox) at top
@@ -119,8 +130,12 @@ func (m *Module) renderPRStatsButton() image.Image {
 	}
 
 	// Draw stats as colored rows
-	// Waiting (yellow)
-	m.drawStatRow(img, rowY, "Wait", stats.WaitingForReview, colorYellow)
+	// Waiting (yellow) - subtract drafts since they're shown separately
+	waitingNonDraft := stats.WaitingForReview - stats.Draft
+	if waitingNonDraft < 0 {
+		waitingNonDraft = 0
+	}
+	m.drawStatRow(img, rowY, "Wait", waitingNonDraft, colorYellow)
 	// Approved (green)
 	m.drawStatRow(img, rowY+14, "OK", stats.Approved, colorGreen)
 	// Changes requested (orange)
@@ -224,9 +239,11 @@ func renderSVGIcon(svgContent string, size int, iconColor color.Color) image.Ima
 func (m *Module) renderPRKey(pr PRInfo) image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, keySize, keySize))
 
-	// Background color based on status (darken if CI failed)
+	// Background color based on status
 	var bgColor color.Color
 	switch {
+	case pr.IsDraft:
+		bgColor = color.RGBA{45, 45, 45, 255} // Dark gray for drafts
 	case pr.CI == CIStatusFailed:
 		bgColor = color.RGBA{60, 30, 30, 255} // Dark red for CI failure
 	case pr.Status == PRStatusApproved:
@@ -240,10 +257,12 @@ func (m *Module) renderPRKey(pr PRInfo) image.Image {
 
 	// Status indicator color (review status)
 	var statusColor color.Color
-	switch pr.Status {
-	case PRStatusApproved:
+	switch {
+	case pr.IsDraft:
+		statusColor = colorDimGray
+	case pr.Status == PRStatusApproved:
 		statusColor = colorGreen
-	case PRStatusChanges:
+	case pr.Status == PRStatusChanges:
 		statusColor = colorOrange
 	default:
 		statusColor = colorYellow
@@ -301,42 +320,188 @@ func (m *Module) renderEmptyKey() image.Image {
 	return img
 }
 
-// renderBackKey renders the back button for dismissing the overlay.
-func (m *Module) renderBackKey() image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, keySize, keySize))
-	draw.Draw(img, img.Bounds(), &image.Uniform{colorKeyBg}, image.Point{}, draw.Src)
-
-	// Draw "Back" label centered
-	m.drawTextCentered(img, "Back", keySize/2, keySize/2+4, m.overlayFace, colorDimGray)
-
-	return img
-}
-
-// renderOverlayStripWithPRs renders the touch strip for the PR overlay with the given PR list.
-func (m *Module) renderOverlayStripWithPRs(prList []PRInfo) image.Image {
+// renderOverlayStripWithPRs renders the touch strip for the PR overlay.
+// Shows PR summary by repo on the left and pagination affordance on the right.
+func (m *Module) renderOverlayStripWithPRs(prList []PRInfo, currentPage int) image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, 800, 100))
 
 	// Dark background
 	draw.Draw(img, img.Bounds(), &image.Uniform{color.RGBA{30, 30, 30, 255}}, image.Point{}, draw.Src)
 
+	const itemsPerPage = 8
+	totalPages := (len(prList) + itemsPerPage - 1) / itemsPerPage
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
 	if len(prList) == 0 {
-		m.drawTextCentered(img, "No PRs", 400, 55, m.stripTitleFace, colorDimGray)
-		return img
+		m.drawTextCentered(img, "No PRs", 300, 55, m.stripTitleFace, colorDimGray)
+	} else {
+		// Left portion (600px): PR summary by repo with status counts
+		m.drawRepoSummary(img, prList)
 	}
 
-	// Show up to 4 PRs in a single row with larger text
-	// Each PR gets 200px width
-	const prWidth = 200
-
-	for i, pr := range prList {
-		if i >= 4 {
-			break
-		}
-		x := i * prWidth
-		m.drawStripPR(img, pr, x)
-	}
+	// Right portion (200px): Pagination affordance above right knob
+	m.drawPaginationAffordance(img, currentPage, totalPages)
 
 	return img
+}
+
+// drawRepoSummary draws PR counts grouped by repo with status colors.
+func (m *Module) drawRepoSummary(img *image.RGBA, prList []PRInfo) {
+	// Group PRs by repo
+	type repoStats struct {
+		draft    int
+		waiting  int
+		approved int
+		changes  int
+	}
+	repos := make(map[string]*repoStats)
+	repoOrder := []string{}
+
+	for _, pr := range prList {
+		repo := pr.Repo
+		// Get just the repo part (after /)
+		if idx := strings.LastIndex(repo, "/"); idx != -1 {
+			repo = repo[idx+1:]
+		}
+
+		if _, exists := repos[repo]; !exists {
+			repos[repo] = &repoStats{}
+			repoOrder = append(repoOrder, repo)
+		}
+
+		// Drafts are counted separately, not as waiting
+		if pr.IsDraft {
+			repos[repo].draft++
+		} else {
+			switch pr.Status {
+			case PRStatusApproved:
+				repos[repo].approved++
+			case PRStatusChanges:
+				repos[repo].changes++
+			default:
+				repos[repo].waiting++
+			}
+		}
+	}
+
+	// Draw repos in a compact format: "repo ●●●" with colored dots
+	// Two rows of repos if needed
+	const maxPerRow = 3
+	const rowHeight = 40
+	const startY = 30
+
+	for i, repo := range repoOrder {
+		if i >= 6 { // Max 6 repos (2 rows of 3)
+			break
+		}
+
+		stats := repos[repo]
+		row := i / maxPerRow
+		col := i % maxPerRow
+		x := 15 + col*195
+		y := startY + row*rowHeight
+
+		// Truncate repo name if needed
+		displayRepo := repo
+		if len(displayRepo) > 10 {
+			displayRepo = displayRepo[:9] + "."
+		}
+
+		// Draw repo name
+		m.drawText(img, displayRepo, x, y, m.stripLabelFace, colorWhite)
+
+		// Draw status dots after the name
+		nameWidth := font.MeasureString(m.stripLabelFace, displayRepo).Ceil()
+		dotX := x + nameWidth + 8
+		dotY := y - 8 // Vertically center dots with text
+
+		// Draw dots for each PR status (up to 5 dots per status to avoid overflow)
+		maxDots := 5
+		dotSize := 8
+		dotSpacing := 10
+
+		// Draft (gray) - shown first
+		count := stats.draft
+		if count > maxDots {
+			count = maxDots
+		}
+		for j := 0; j < count; j++ {
+			m.drawDot(img, dotX, dotY, colorDimGray)
+			dotX += dotSpacing
+		}
+		if stats.draft > maxDots {
+			m.drawText(img, "+", dotX-2, y, m.stripLabelFace, colorDimGray)
+			dotX += dotSize
+		}
+
+		// Waiting (yellow)
+		count = stats.waiting
+		if count > maxDots {
+			count = maxDots
+		}
+		for j := 0; j < count; j++ {
+			m.drawDot(img, dotX, dotY, colorYellow)
+			dotX += dotSpacing
+		}
+		if stats.waiting > maxDots {
+			m.drawText(img, "+", dotX-2, y, m.stripLabelFace, colorYellow)
+			dotX += dotSize
+		}
+
+		// Approved (green)
+		count = stats.approved
+		if count > maxDots {
+			count = maxDots
+		}
+		for j := 0; j < count; j++ {
+			m.drawDot(img, dotX, dotY, colorGreen)
+			dotX += dotSpacing
+		}
+		if stats.approved > maxDots {
+			m.drawText(img, "+", dotX-2, y, m.stripLabelFace, colorGreen)
+			dotX += dotSize
+		}
+
+		// Changes (orange)
+		count = stats.changes
+		if count > maxDots {
+			count = maxDots
+		}
+		for j := 0; j < count; j++ {
+			m.drawDot(img, dotX, dotY, colorOrange)
+			dotX += dotSpacing
+		}
+		if stats.changes > maxDots {
+			m.drawText(img, "+", dotX-2, y, m.stripLabelFace, colorOrange)
+		}
+	}
+}
+
+// drawDot draws a small colored dot.
+func (m *Module) drawDot(img *image.RGBA, x, y int, col color.Color) {
+	for dy := 0; dy < 6; dy++ {
+		for dx := 0; dx < 6; dx++ {
+			img.Set(x+dx, y+dy, col)
+		}
+	}
+}
+
+// drawPaginationAffordance draws the pagination controls on the right side of the strip.
+func (m *Module) drawPaginationAffordance(img *image.RGBA, currentPage, totalPages int) {
+	// Right 200px area (x: 600-800), positioned above Dial4
+	centerX := 700 // Center of the right 200px region
+
+	// Draw page indicator
+	pageStr := fmt.Sprintf("%d/%d", currentPage+1, totalPages)
+	m.drawTextCentered(img, pageStr, centerX, 40, m.stripTitleFace, colorWhite)
+
+	// Draw rotation hint with ASCII
+	m.drawTextCentered(img, "<< turn >>", centerX, 65, m.stripLabelFace, colorDimGray)
+
+	// Draw "click=back" hint
+	m.drawTextCentered(img, "click=back", centerX, 88, m.stripLabelFace, colorDimGray)
 }
 
 // drawStripPR draws a single PR entry on the strip.

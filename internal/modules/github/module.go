@@ -43,6 +43,7 @@ type Module struct {
 	// Overlay state
 	overlayType   OverlayType
 	overlayExpiry time.Time
+	currentPage   int // Current page in pagination (0-indexed)
 
 	// Fonts
 	labelFace      font.Face
@@ -142,10 +143,13 @@ func (m *Module) fetchStats(ctx context.Context) {
 		// Continue with stats even if list fails
 	}
 
-	// Count CI failures from PR list
+	// Count CI failures and drafts from PR list
 	for _, pr := range prList {
 		if pr.CI == CIStatusFailed {
 			stats.CIFailed++
+		}
+		if pr.IsDraft {
+			stats.Draft++
 		}
 	}
 
@@ -246,6 +250,7 @@ func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
 		m.overlayType = OverlayMyPRs
 	}
 	m.overlayExpiry = time.Now().Add(5 * time.Second)
+	m.currentPage = 0 // Reset to first page
 	m.mu.Unlock()
 
 	return nil
@@ -253,6 +258,61 @@ func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
 
 // HandleDial processes dial events.
 func (m *Module) HandleDial(id module.DialID, event module.DialEvent) error {
+	return nil
+}
+
+// HandleOverlayDial processes dial events when the overlay is active.
+// Dial4 (right knob) controls pagination: rotate to change page, click to dismiss overlay.
+func (m *Module) HandleOverlayDial(id module.DialID, event module.DialEvent) error {
+	// Only handle Dial4 (right knob)
+	if id != module.Dial4 {
+		return nil
+	}
+
+	// Get the appropriate PR list based on overlay type
+	m.mu.RLock()
+	overlayType := m.overlayType
+	m.mu.RUnlock()
+
+	var prList []PRInfo
+	if overlayType == OverlayReviewRequested {
+		prList = m.getReviewPRList()
+	} else {
+		prList = m.getPRList()
+	}
+
+	const itemsPerPage = 8
+	totalPages := (len(prList) + itemsPerPage - 1) / itemsPerPage
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	switch event.Type {
+	case module.DialRotate:
+		m.mu.Lock()
+		// Rotate right (positive delta) = next page, left = previous page
+		if event.Delta > 0 {
+			m.currentPage++
+			if m.currentPage >= totalPages {
+				m.currentPage = totalPages - 1
+			}
+		} else if event.Delta < 0 {
+			m.currentPage--
+			if m.currentPage < 0 {
+				m.currentPage = 0
+			}
+		}
+		// Reset the 5s timer on page change
+		m.overlayExpiry = time.Now().Add(5 * time.Second)
+		m.mu.Unlock()
+
+	case module.DialRelease:
+		// Click dismisses the overlay
+		m.mu.Lock()
+		m.overlayType = OverlayNone
+		m.mu.Unlock()
+	}
+
 	return nil
 }
 
@@ -268,17 +328,10 @@ func (m *Module) HandleOverlayKey(id module.KeyID, event module.KeyEvent) error 
 		return nil
 	}
 
-	// Key8 (bottom right) dismisses overlay
-	if id == module.Key8 {
-		m.mu.Lock()
-		m.overlayType = OverlayNone
-		m.mu.Unlock()
-		return nil
-	}
-
 	// Get the appropriate PR list based on overlay type
 	m.mu.RLock()
 	overlayType := m.overlayType
+	currentPage := m.currentPage
 	m.mu.RUnlock()
 
 	var prList []PRInfo
@@ -288,10 +341,13 @@ func (m *Module) HandleOverlayKey(id module.KeyID, event module.KeyEvent) error 
 		prList = m.getPRList()
 	}
 
-	// Map key to PR index (Key1-Key7 map to PRs 0-6)
+	// Map key to PR index (Key1-Key8 map to PRs on current page)
+	// All 8 keys now show PRs (back is via dial click)
+	const itemsPerPage = 8
 	keyIndex := int(id) - 1 // Key1=1, so subtract 1 for 0-indexed
-	if keyIndex >= 0 && keyIndex < len(prList) {
-		pr := prList[keyIndex]
+	prIndex := currentPage*itemsPerPage + keyIndex
+	if prIndex >= 0 && prIndex < len(prList) {
+		pr := prList[prIndex]
 		if pr.URL != "" {
 			m.openURL(pr.URL)
 		}
@@ -302,37 +358,9 @@ func (m *Module) HandleOverlayKey(id module.KeyID, event module.KeyEvent) error 
 
 // HandleOverlayStripTouch processes touch strip events when the overlay is active.
 func (m *Module) HandleOverlayStripTouch(event module.TouchStripEvent) error {
-	// Only handle taps (short or long)
-	if event.Type != module.TouchTap && event.Type != module.TouchLongTap {
-		return nil
-	}
-
-	// Get the appropriate PR list based on overlay type
-	m.mu.RLock()
-	overlayType := m.overlayType
-	m.mu.RUnlock()
-
-	var prList []PRInfo
-	if overlayType == OverlayReviewRequested {
-		prList = m.getReviewPRList()
-	} else {
-		prList = m.getPRList()
-	}
-
-	if len(prList) == 0 {
-		return nil
-	}
-
-	// Strip is 800px wide, divided into 4 sections of 200px each
-	const prWidth = 200
-	prIndex := event.Point.X / prWidth
-	if prIndex >= 0 && prIndex < len(prList) && prIndex < 4 {
-		pr := prList[prIndex]
-		if pr.URL != "" {
-			m.openURL(pr.URL)
-		}
-	}
-
+	// Strip now shows repo summary (left) and pagination affordance (right)
+	// Tapping the right side (pagination area) does nothing special
+	// Users interact with PRs via the keys, and pagination via the right dial
 	return nil
 }
 
@@ -366,13 +394,14 @@ func (m *Module) IsOverlayActive() bool {
 	return true
 }
 
-// RenderOverlayKeys returns images for all 8 keys showing PR list.
+// RenderOverlayKeys returns images for all 8 keys showing PR list with pagination.
 func (m *Module) RenderOverlayKeys() map[module.KeyID]image.Image {
 	keys := make(map[module.KeyID]image.Image)
 
 	// Get the appropriate PR list based on overlay type
 	m.mu.RLock()
 	overlayType := m.overlayType
+	currentPage := m.currentPage
 	m.mu.RUnlock()
 
 	var prList []PRInfo
@@ -382,22 +411,22 @@ func (m *Module) RenderOverlayKeys() map[module.KeyID]image.Image {
 		prList = m.getPRList()
 	}
 
-	// Render up to 7 PRs on Keys 1-7, Key8 is the back button
+	// All 8 keys show PRs (back is now via dial click)
+	const itemsPerPage = 8
 	prKeys := []module.KeyID{
 		module.Key1, module.Key2, module.Key3, module.Key4,
-		module.Key5, module.Key6, module.Key7,
+		module.Key5, module.Key6, module.Key7, module.Key8,
 	}
 
+	startIndex := currentPage * itemsPerPage
 	for i, keyID := range prKeys {
-		if i < len(prList) {
-			keys[keyID] = m.renderPRKey(prList[i])
+		prIndex := startIndex + i
+		if prIndex < len(prList) {
+			keys[keyID] = m.renderPRKey(prList[prIndex])
 		} else {
 			keys[keyID] = m.renderEmptyKey()
 		}
 	}
-
-	// Key8 is the back button
-	keys[module.Key8] = m.renderBackKey()
 
 	return keys
 }
@@ -407,6 +436,7 @@ func (m *Module) RenderOverlayStrip() image.Image {
 	// Get the appropriate PR list based on overlay type
 	m.mu.RLock()
 	overlayType := m.overlayType
+	currentPage := m.currentPage
 	m.mu.RUnlock()
 
 	var prList []PRInfo
@@ -416,5 +446,5 @@ func (m *Module) RenderOverlayStrip() image.Image {
 		prList = m.getPRList()
 	}
 
-	return m.renderOverlayStripWithPRs(prList)
+	return m.renderOverlayStripWithPRs(prList, currentPage)
 }

@@ -200,40 +200,58 @@ func (c *Coordinator) setupEventHandlers() {
 		})
 	}
 
-	// Dial rotation handlers
-	for dialID, m := range c.dialOwners {
+	// Dial rotation handlers - register for ALL dials to support overlay
+	allDials := []module.DialID{module.Dial1, module.Dial2, module.Dial3, module.Dial4}
+	for _, dialID := range allDials {
 		dial := dialID
-		mod := m
+		owner := c.dialOwners[dial] // may be nil for unowned dials
 		c.device.AddDialRotateHandler(device.DialID(dial), func(d device.Device, di device.Dial, delta int8) error {
-			if c.failedModules[mod] {
-				return nil
-			}
 			event := module.DialEvent{
 				Type:  module.DialRotate,
 				Delta: delta,
 			}
-			return mod.HandleDial(dial, event)
+			// Check for active overlay first
+			if overlay := c.getActiveOverlay(); overlay != nil {
+				return overlay.HandleOverlayDial(dial, event)
+			}
+			// No overlay - route to owner if exists
+			if owner == nil || c.failedModules[owner] {
+				return nil
+			}
+			return owner.HandleDial(dial, event)
 		})
 	}
 
-	// Dial press handlers
-	for dialID, m := range c.dialOwners {
+	// Dial press handlers - register for ALL dials to support overlay
+	for _, dialID := range allDials {
 		dial := dialID
-		mod := m
+		owner := c.dialOwners[dial] // may be nil for unowned dials
 		c.device.AddDialSwitchHandler(device.DialID(dial), func(d device.Device, di device.Dial) error {
-			if c.failedModules[mod] {
+			// Check for active overlay first
+			if overlay := c.getActiveOverlay(); overlay != nil {
+				// Create press event
+				event := module.DialEvent{Type: module.DialPress}
+				if err := overlay.HandleOverlayDial(dial, event); err != nil {
+					return err
+				}
+				// Wait for release and create release event
+				duration := di.WaitForRelease()
+				event = module.DialEvent{Type: module.DialRelease, Duration: duration}
+				return overlay.HandleOverlayDial(dial, event)
+			}
+			// No overlay - route to owner if exists
+			if owner == nil || c.failedModules[owner] {
 				return nil
 			}
 			// Create press event
 			event := module.DialEvent{Type: module.DialPress}
-			if err := mod.HandleDial(dial, event); err != nil {
+			if err := owner.HandleDial(dial, event); err != nil {
 				return err
 			}
-
 			// Wait for release and create release event
 			duration := di.WaitForRelease()
 			event = module.DialEvent{Type: module.DialRelease, Duration: duration}
-			return mod.HandleDial(dial, event)
+			return owner.HandleDial(dial, event)
 		})
 	}
 

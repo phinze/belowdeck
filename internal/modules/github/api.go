@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -17,6 +18,7 @@ type PRStats struct {
 	Approved         int
 	ChangesRequested int
 	CIFailed         int
+	Draft            int
 }
 
 // ReviewStats holds the count of PRs awaiting my review.
@@ -44,13 +46,14 @@ const (
 
 // PRInfo holds information about a single PR.
 type PRInfo struct {
-	Title    string
-	Repo     string
-	Number   int
-	Status   PRStatus
-	CI       CIStatus
-	URL      string
-	HeadSHA  string // For fetching CI status
+	Title   string
+	Repo    string
+	Number  int
+	Status  PRStatus
+	CI      CIStatus
+	URL     string
+	HeadSHA string // For fetching CI status
+	IsDraft bool
 }
 
 // Client is a GitHub API client.
@@ -279,7 +282,31 @@ func (c *Client) GetMyPRList(ctx context.Context) ([]PRInfo, error) {
 	// Fetch CI status for all PRs in parallel
 	c.fetchCIStatuses(ctx, allPRs)
 
+	// Sort by repo name, then by PR number within each repo
+	sortPRsByRepo(allPRs)
+
 	return allPRs, nil
+}
+
+// sortPRsByRepo sorts PRs by repo name alphabetically, then by PR number.
+func sortPRsByRepo(prs []PRInfo) {
+	sort.Slice(prs, func(i, j int) bool {
+		// Compare repo names (just the repo part after /)
+		repoI := prs[i].Repo
+		if idx := strings.LastIndex(repoI, "/"); idx != -1 {
+			repoI = repoI[idx+1:]
+		}
+		repoJ := prs[j].Repo
+		if idx := strings.LastIndex(repoJ, "/"); idx != -1 {
+			repoJ = repoJ[idx+1:]
+		}
+
+		if repoI != repoJ {
+			return repoI < repoJ
+		}
+		// Same repo, sort by PR number
+		return prs[i].Number < prs[j].Number
+	})
 }
 
 // fetchCIStatuses fetches CI status for a list of PRs in parallel.
@@ -403,44 +430,51 @@ func (c *Client) searchPRs(ctx context.Context, query string, status PRStatus) (
 		})
 	}
 
-	// Fetch head SHAs for all PRs in parallel
-	c.fetchHeadSHAs(ctx, prs)
+	// Fetch head SHAs and draft status for all PRs in parallel
+	c.fetchPRDetails(ctx, prs)
 
 	return prs, nil
 }
 
-// fetchHeadSHAs fetches the head SHA for each PR in parallel.
-func (c *Client) fetchHeadSHAs(ctx context.Context, prs []PRInfo) {
+// fetchPRDetails fetches the head SHA and draft status for each PR in parallel.
+func (c *Client) fetchPRDetails(ctx context.Context, prs []PRInfo) {
 	if len(prs) == 0 {
 		return
 	}
 
-	type shaResult struct {
-		index int
-		sha   string
+	type detailsResult struct {
+		index   int
+		details prDetails
 	}
-	results := make(chan shaResult, len(prs))
+	results := make(chan detailsResult, len(prs))
 
 	for i, pr := range prs {
 		go func(idx int, pr PRInfo) {
-			sha := c.getPRHeadSHA(ctx, pr.Repo, pr.Number)
-			results <- shaResult{idx, sha}
+			details := c.getPRDetails(ctx, pr.Repo, pr.Number)
+			results <- detailsResult{idx, details}
 		}(i, pr)
 	}
 
 	for range len(prs) {
 		r := <-results
-		prs[r.index].HeadSHA = r.sha
+		prs[r.index].HeadSHA = r.details.HeadSHA
+		prs[r.index].IsDraft = r.details.IsDraft
 	}
 }
 
-// getPRHeadSHA fetches the head SHA for a specific PR.
-func (c *Client) getPRHeadSHA(ctx context.Context, repo string, number int) string {
+// prDetails holds extra details fetched from the PR API.
+type prDetails struct {
+	HeadSHA string
+	IsDraft bool
+}
+
+// getPRDetails fetches the head SHA and draft status for a specific PR.
+func (c *Client) getPRDetails(ctx context.Context, repo string, number int) prDetails {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d", repo, number)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
-		return ""
+		return prDetails{}
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.token)
@@ -448,24 +482,28 @@ func (c *Client) getPRHeadSHA(ctx context.Context, repo string, number int) stri
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return ""
+		return prDetails{}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return prDetails{}
 	}
 
 	var pr struct {
-		Head struct {
+		Draft bool `json:"draft"`
+		Head  struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		return ""
+		return prDetails{}
 	}
 
-	return pr.Head.SHA
+	return prDetails{
+		HeadSHA: pr.Head.SHA,
+		IsDraft: pr.Draft,
+	}
 }
 
 // GetReviewRequestedStats fetches the count of PRs awaiting my review.
