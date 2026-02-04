@@ -75,6 +75,23 @@ func main() {
 		default:
 		}
 
+		// Drain any stale wake signals that accumulated while waiting for device.
+		// Without this, a wake signal from before device enumeration would
+		// immediately trigger a teardown in runWithDevice.
+	drainWake:
+		for {
+			select {
+			case <-wakeCh:
+				log.Println("Draining stale wake signal")
+			default:
+				break drainWake
+			}
+		}
+
+		// Brief stabilization delay - USB device enumeration may not be complete
+		// even after GetDevice succeeds. Give the device a moment to fully initialize.
+		time.Sleep(500 * time.Millisecond)
+
 		runWithDevice(ctx, dev, wakeCh)
 
 		// Check if we should exit or wait for reconnect
@@ -111,7 +128,26 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}) device.D
 		case <-ctx.Done():
 			return nil
 		case <-wakeCh:
-			log.Println("Wake signal received, checking for device...")
+			// After wake, USB devices may take several seconds to enumerate.
+			// Retry multiple times with short delays instead of just checking once.
+			log.Println("Wake signal received, probing for device...")
+			for i := 0; i < 10; i++ {
+				dev, err := streamdeck.GetDevice("")
+				if err == nil {
+					if err := dev.Open(); err == nil {
+						log.Println("Device connected!")
+						return device.NewHardware(dev)
+					}
+					log.Printf("Device found but Open failed: %v", err)
+				}
+				// Context-aware sleep
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+			log.Println("Device not found after wake, resuming polling...")
 		case <-time.After(2 * time.Second):
 		}
 
@@ -202,6 +238,11 @@ func runWithDevice(ctx context.Context, dev device.Device, wakeCh <-chan struct{
 	case <-time.After(2 * time.Second):
 		log.Println("Cleanup timed out")
 	}
+
+	// Brief delay to let any pending USB I/O callbacks complete.
+	// The usbhid library doesn't cancel ongoing I/O on close, so callbacks
+	// can fire after close with stale context pointers causing crashes.
+	time.Sleep(200 * time.Millisecond)
 
 	// Close device - need to wait for this on wake to avoid race condition
 	// where we try to reopen before close completes
