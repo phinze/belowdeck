@@ -105,20 +105,50 @@ func main() {
 	}
 }
 
+// tryGetDeviceWithTimeout attempts to get and open a Stream Deck device with a timeout.
+// Returns the device if successful, nil otherwise. The timeout prevents blocking indefinitely
+// when the USB subsystem is in a bad state.
+func tryGetDeviceWithTimeout(timeout time.Duration) *streamdeck.Device {
+	type result struct {
+		dev *streamdeck.Device
+		err error
+	}
+	ch := make(chan result, 1)
+
+	go func() {
+		dev, err := streamdeck.GetDevice("")
+		if err != nil {
+			ch <- result{nil, err}
+			return
+		}
+		if err := dev.Open(); err != nil {
+			ch <- result{nil, err}
+			return
+		}
+		ch <- result{dev, nil}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil
+		}
+		return r.dev
+	case <-time.After(timeout):
+		log.Println("Device detection timed out")
+		return nil
+	}
+}
+
 // waitForHardwareDevice polls for a Stream Deck device until one is available.
 // Uses polling since macOS doesn't have a simple USB hotplug event API.
 // Wake signals trigger immediate retry instead of waiting for the poll interval.
 func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}) device.Device {
+	const deviceTimeout = 5 * time.Second
+
 	// First, try to get an already-connected device
-	dev, err := streamdeck.GetDevice("")
-	if err != nil {
-		log.Printf("GetDevice error: %v", err)
-	} else {
-		if err := dev.Open(); err != nil {
-			log.Printf("Device found but Open failed: %v", err)
-		} else {
-			return device.NewHardware(dev)
-		}
+	if dev := tryGetDeviceWithTimeout(deviceTimeout); dev != nil {
+		return device.NewHardware(dev)
 	}
 
 	log.Println("Waiting for device...")
@@ -132,13 +162,9 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}) device.D
 			// Retry multiple times with short delays instead of just checking once.
 			log.Println("Wake signal received, probing for device...")
 			for i := 0; i < 10; i++ {
-				dev, err := streamdeck.GetDevice("")
-				if err == nil {
-					if err := dev.Open(); err == nil {
-						log.Println("Device connected!")
-						return device.NewHardware(dev)
-					}
-					log.Printf("Device found but Open failed: %v", err)
+				if dev := tryGetDeviceWithTimeout(deviceTimeout); dev != nil {
+					log.Println("Device connected!")
+					return device.NewHardware(dev)
 				}
 				// Context-aware sleep
 				select {
@@ -151,17 +177,10 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}) device.D
 		case <-time.After(2 * time.Second):
 		}
 
-		dev, err := streamdeck.GetDevice("")
-		if err != nil {
-			// Only log occasionally to avoid spam
-			continue
+		if dev := tryGetDeviceWithTimeout(deviceTimeout); dev != nil {
+			log.Println("Device connected!")
+			return device.NewHardware(dev)
 		}
-		if err := dev.Open(); err != nil {
-			log.Printf("Device found but Open failed: %v", err)
-			continue
-		}
-		log.Println("Device connected!")
-		return device.NewHardware(dev)
 	}
 }
 
