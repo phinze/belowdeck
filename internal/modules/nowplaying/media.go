@@ -21,6 +21,7 @@ type NowPlaying struct {
 	Playing              bool   `json:"playing"`
 	ArtworkData          string `json:"artworkData"`
 	ArtworkMime          string `json:"artworkMimeType"`
+	BundleIdentifier     string `json:"bundleIdentifier"`
 }
 
 // liveState wraps NowPlaying with thread-safe access.
@@ -132,6 +133,9 @@ func mergePayloadMap(dst *NowPlaying, src map[string]interface{}) {
 	}
 	if v, ok := src["artworkMimeType"].(string); ok {
 		dst.ArtworkMime = v
+	}
+	if v, ok := src["bundleIdentifier"].(string); ok {
+		dst.BundleIdentifier = v
 	}
 }
 

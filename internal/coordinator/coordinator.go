@@ -279,14 +279,12 @@ func (c *Coordinator) setupEventHandlers() {
 
 // routeStripEvent finds the owning module for a strip event and dispatches it.
 func (c *Coordinator) routeStripEvent(event module.TouchStripEvent) error {
-	// For now, route to first module that has a strip region
-	// Future: check which module's strip rect contains the event point
 	for _, m := range c.modules {
 		if c.failedModules[m] {
 			continue
 		}
 		res := c.resourcesForModule(m)
-		if res.HasStrip() {
+		if res.HasStrip() && event.Point.In(res.StripRect) {
 			return m.HandleStripTouch(event)
 		}
 	}

@@ -200,6 +200,16 @@ func (m *Module) HandleDial(id module.DialID, event module.DialEvent) error {
 
 // HandleStripTouch processes touch strip events.
 func (m *Module) HandleStripTouch(event module.TouchStripEvent) error {
-	// Not implemented yet - could add seek by touch
+	if event.Type != module.TouchTap {
+		return nil
+	}
+
+	np := m.liveState.get()
+	if np.BundleIdentifier == "" {
+		return nil
+	}
+
+	log.Printf("Strip tap: opening %s", np.BundleIdentifier)
+	go exec.Command("open", "-b", np.BundleIdentifier).Run()
 	return nil
 }

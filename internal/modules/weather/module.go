@@ -7,6 +7,7 @@ import (
 	"image"
 	"log"
 	"os"
+	"os/exec"
 	"strconv"
 	"sync"
 	"time"
@@ -220,6 +221,11 @@ func (m *Module) HandleDial(id module.DialID, event module.DialEvent) error {
 
 // HandleStripTouch processes touch strip events.
 func (m *Module) HandleStripTouch(event module.TouchStripEvent) error {
-	// Could implement tap to refresh
+	if event.Type != module.TouchTap {
+		return nil
+	}
+
+	log.Println("Strip tap: opening Weather")
+	go exec.Command("open", "-a", "Weather").Run()
 	return nil
 }
