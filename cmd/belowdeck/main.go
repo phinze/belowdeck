@@ -18,6 +18,7 @@ import (
 	"github.com/phinze/belowdeck/internal/modules/homeassistant"
 	"github.com/phinze/belowdeck/internal/modules/nowplaying"
 	"github.com/phinze/belowdeck/internal/modules/weather"
+	"github.com/phinze/belowdeck/internal/usbwatch"
 	"github.com/prashantgupta24/mac-sleep-notifier/notifier"
 	"rafaelmartins.com/p/streamdeck"
 )
@@ -59,9 +60,12 @@ func main() {
 		}
 	}()
 
+	// Start event-driven USB device watcher (fires callback on device arrival)
+	deviceArrivedCh := usbwatch.Watch(ctx, 0x0fd9)
+
 	// Main device loop - wait for device, run, repeat on disconnect
 	for {
-		dev := waitForHardwareDevice(ctx, wakeCh)
+		dev := waitForHardwareDevice(ctx, wakeCh, deviceArrivedCh)
 		if dev == nil {
 			// Context cancelled
 			break
@@ -162,10 +166,11 @@ func tryGetDeviceWithTimeout(timeout time.Duration) *streamdeck.Device {
 	}
 }
 
-// waitForHardwareDevice polls for a Stream Deck device until one is available.
-// Uses polling since macOS doesn't have a simple USB hotplug event API.
-// Wake signals trigger immediate retry instead of waiting for the poll interval.
-func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}) device.Device {
+// waitForHardwareDevice waits for a Stream Deck device using event-driven USB
+// detection. The deviceArrivedCh fires when IOKit detects a matching HID device,
+// eliminating the need for periodic polling. Wake signals are kept as a fallback
+// for sleep/wake edge cases.
+func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}, deviceArrivedCh <-chan struct{}) device.Device {
 	const deviceTimeout = 5 * time.Second
 
 	// First, try to get an already-connected device
@@ -179,6 +184,8 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}) device.D
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-deviceArrivedCh:
+			log.Println("USB device arrival detected, probing...")
 		case <-wakeCh:
 			// After wake, USB devices may take several seconds to enumerate.
 			// Retry multiple times with short delays instead of just checking once.
@@ -188,15 +195,14 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}) device.D
 					log.Println("Device connected!")
 					return device.NewHardware(dev)
 				}
-				// Context-aware sleep
 				select {
 				case <-ctx.Done():
 					return nil
 				case <-time.After(500 * time.Millisecond):
 				}
 			}
-			log.Println("Device not found after wake, resuming polling...")
-		case <-time.After(2 * time.Second):
+			log.Println("Device not found after wake, resuming wait...")
+			continue
 		}
 
 		if dev := tryGetDeviceWithTimeout(deviceTimeout); dev != nil {
