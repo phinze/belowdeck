@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -105,10 +106,22 @@ func main() {
 	}
 }
 
+// enumInFlight tracks whether a device enumeration goroutine is currently running.
+// IOHIDManagerCopyDevices can block indefinitely in the kernel when the USB subsystem
+// is in a bad state. Without this guard, each timed-out poll spawns a new goroutine
+// that also blocks, piling up zombie goroutines that hold IOKit resources and prevent
+// any future enumeration from succeeding.
+var enumInFlight atomic.Bool
+
 // tryGetDeviceWithTimeout attempts to get and open a Stream Deck device with a timeout.
-// Returns the device if successful, nil otherwise. The timeout prevents blocking indefinitely
-// when the USB subsystem is in a bad state.
+// Returns the device if successful, nil otherwise. Only one enumeration goroutine is
+// allowed in flight at a time to prevent IOKit resource contention.
 func tryGetDeviceWithTimeout(timeout time.Duration) *streamdeck.Device {
+	// If a previous enumeration is still stuck in CGO, don't spawn another.
+	if !enumInFlight.CompareAndSwap(false, true) {
+		return nil
+	}
+
 	type result struct {
 		dev *streamdeck.Device
 		err error
@@ -116,6 +129,7 @@ func tryGetDeviceWithTimeout(timeout time.Duration) *streamdeck.Device {
 	ch := make(chan result, 1)
 
 	go func() {
+		defer enumInFlight.Store(false)
 		dev, err := streamdeck.GetDevice("")
 		if err != nil {
 			ch <- result{nil, err}
@@ -135,7 +149,15 @@ func tryGetDeviceWithTimeout(timeout time.Duration) *streamdeck.Device {
 		}
 		return r.dev
 	case <-time.After(timeout):
-		log.Println("Device detection timed out")
+		log.Println("Device detection timed out (enumeration goroutine still in CGO)")
+		// Goroutine is stuck in kernel - clean up if it ever returns.
+		go func() {
+			r := <-ch
+			if r.dev != nil {
+				log.Println("Late device arrival from timed-out enumeration, closing")
+				r.dev.Close()
+			}
+		}()
 		return nil
 	}
 }
