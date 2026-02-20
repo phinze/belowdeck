@@ -67,6 +67,7 @@ in
         "/usr/sbin"
         "/sbin"
         (builtins.dirOf cfg.mediaControlPath)
+        "/etc/profiles/per-user/${cfg.user}/bin"
       ];
       serviceConfig = {
         ProgramArguments = [
