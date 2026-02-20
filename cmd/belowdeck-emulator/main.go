@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/phinze/belowdeck/internal/config"
 	"github.com/phinze/belowdeck/internal/coordinator"
 	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/device/emulator"
@@ -47,8 +48,14 @@ func main() {
 		log.Fatalf("Failed to open emulator: %v", err)
 	}
 
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		log.Printf("Warning: config load: %v", err)
+	}
+
 	// Start coordinator in background goroutine
-	go runWithDevice(ctx, emu)
+	go runWithDevice(ctx, cfg, emu)
 
 	// Run GUI on main thread (required for macOS)
 	if err := emu.RunGUI(); err != nil {
@@ -57,7 +64,7 @@ func main() {
 }
 
 // runWithDevice runs the coordinator with the given device until context cancel.
-func runWithDevice(ctx context.Context, dev device.Device) {
+func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device) {
 	log.Printf("Connected to: %s", dev.GetModelName())
 
 	// Set brightness and clear keys
@@ -76,12 +83,12 @@ func runWithDevice(ctx context.Context, dev device.Device) {
 		Dials:     []module.DialID{module.Dial1, module.Dial2},
 	})
 
-	w := weather.New(dev)
+	w := weather.New(dev, cfg)
 	coord.RegisterModule(w, module.Resources{
 		StripRect: image.Rect(400, 0, 800, 100),
 	})
 
-	ha := homeassistant.New(dev)
+	ha := homeassistant.New(dev, cfg)
 	coord.RegisterModule(ha, module.Resources{
 		Keys:  []module.KeyID{module.Key1, module.Key2},
 		Dials: []module.DialID{module.Dial4},

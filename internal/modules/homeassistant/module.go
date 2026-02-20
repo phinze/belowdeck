@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"image"
 	"log"
-	"os"
 	"sync"
 	"time"
 
+	"github.com/phinze/belowdeck/internal/config"
 	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/module"
 	"golang.org/x/image/font"
@@ -28,6 +28,7 @@ type Module struct {
 	module.BaseModule
 
 	device  device.Device
+	appCfg  *config.Config
 	config  Config
 	client  *Client
 	enabled bool
@@ -45,10 +46,11 @@ type Module struct {
 }
 
 // New creates a new Home Assistant module.
-func New(dev device.Device) *Module {
+func New(dev device.Device, appCfg *config.Config) *Module {
 	return &Module{
 		BaseModule: module.NewBaseModule("homeassistant"),
 		device:     dev,
+		appCfg:     appCfg,
 	}
 }
 
@@ -66,8 +68,8 @@ func (m *Module) Init(ctx context.Context, res module.Resources) error {
 
 	m.resources = res
 
-	// Load config from environment (optional - module disabled if not configured)
-	config, err := loadConfig()
+	// Load config (optional - module disabled if not configured)
+	config, err := loadConfig(m.appCfg)
 	if err != nil {
 		log.Printf("Home Assistant module disabled: %v", err)
 		m.enabled = false
@@ -156,25 +158,28 @@ func (m *Module) Stop() error {
 	return m.BaseModule.Stop()
 }
 
-// loadConfig loads configuration from environment variables.
-func loadConfig() (Config, error) {
-	url := os.Getenv("HASS_SERVER")
+// loadConfig builds module Config from the app-level config.
+func loadConfig(appCfg *config.Config) (Config, error) {
+	if appCfg == nil {
+		return Config{}, fmt.Errorf("no configuration provided")
+	}
+
+	url := appCfg.HomeAssistant.Server
 	if url == "" {
-		return Config{}, fmt.Errorf("HASS_SERVER environment variable not set")
+		return Config{}, fmt.Errorf("Home Assistant server not configured")
 	}
 
-	token := os.Getenv("HASS_TOKEN")
+	token := appCfg.HomeAssistant.Token
 	if token == "" {
-		return Config{}, fmt.Errorf("HASS_TOKEN environment variable not set")
+		return Config{}, fmt.Errorf("Home Assistant token not configured")
 	}
 
-	ringLightEntity := os.Getenv("HASS_RING_LIGHT_ENTITY")
+	ringLightEntity := appCfg.HomeAssistant.RingLightEntity
 	if ringLightEntity == "" {
-		return Config{}, fmt.Errorf("HASS_RING_LIGHT_ENTITY environment variable not set")
+		return Config{}, fmt.Errorf("Home Assistant ring light entity not configured")
 	}
 
-	// Office light defaults to signe_gradient_floor_1 if not set
-	officeLightEntity := os.Getenv("HASS_OFFICE_LIGHT_ENTITY")
+	officeLightEntity := appCfg.HomeAssistant.OfficeLightEntity
 	if officeLightEntity == "" {
 		officeLightEntity = "light.signe_gradient_floor_1"
 	}

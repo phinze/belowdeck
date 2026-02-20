@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"image"
 	"log"
-	"os"
 	"os/exec"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/phinze/belowdeck/internal/config"
 	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/module"
 	"golang.org/x/image/font"
@@ -28,8 +28,9 @@ type Config struct {
 type Module struct {
 	module.BaseModule
 
-	device device.Device
-	config Config
+	device  device.Device
+	appCfg  *config.Config
+	config  Config
 
 	// State
 	state *weatherState
@@ -72,10 +73,11 @@ func (s *weatherState) update(current CurrentWeather, daily DailyForecast, preci
 }
 
 // New creates a new Weather module.
-func New(dev device.Device) *Module {
+func New(dev device.Device, appCfg *config.Config) *Module {
 	return &Module{
 		BaseModule: module.NewBaseModule("weather"),
 		device:     dev,
+		appCfg:     appCfg,
 		state:      newWeatherState(),
 	}
 }
@@ -92,8 +94,8 @@ func (m *Module) Init(ctx context.Context, res module.Resources) error {
 		return err
 	}
 
-	// Load config from environment
-	config, err := loadConfig()
+	// Load config
+	config, err := loadConfig(m.appCfg)
 	if err != nil {
 		return err
 	}
@@ -121,27 +123,29 @@ func (m *Module) Stop() error {
 	return m.BaseModule.Stop()
 }
 
-// loadConfig loads configuration from environment variables.
-func loadConfig() (Config, error) {
-	apiKey := os.Getenv("OPENWEATHERMAP_API_KEY")
+// loadConfig builds module Config from the app-level config.
+func loadConfig(appCfg *config.Config) (Config, error) {
+	if appCfg == nil {
+		return Config{}, fmt.Errorf("no configuration provided")
+	}
+
+	apiKey := appCfg.Weather.APIKey
 	if apiKey == "" {
-		return Config{}, fmt.Errorf("OPENWEATHERMAP_API_KEY environment variable not set")
+		return Config{}, fmt.Errorf("OpenWeatherMap API key not configured")
 	}
 
-	latStr := os.Getenv("WEATHER_LAT")
-	lonStr := os.Getenv("WEATHER_LON")
-	if latStr == "" || lonStr == "" {
-		return Config{}, fmt.Errorf("WEATHER_LAT and WEATHER_LON environment variables must be set")
+	if appCfg.Weather.Lat == "" || appCfg.Weather.Lon == "" {
+		return Config{}, fmt.Errorf("weather lat/lon not configured")
 	}
 
-	lat, err := strconv.ParseFloat(latStr, 64)
+	lat, err := strconv.ParseFloat(appCfg.Weather.Lat, 64)
 	if err != nil {
-		return Config{}, fmt.Errorf("invalid WEATHER_LAT: %w", err)
+		return Config{}, fmt.Errorf("invalid weather lat: %w", err)
 	}
 
-	lon, err := strconv.ParseFloat(lonStr, 64)
+	lon, err := strconv.ParseFloat(appCfg.Weather.Lon, 64)
 	if err != nil {
-		return Config{}, fmt.Errorf("invalid WEATHER_LON: %w", err)
+		return Config{}, fmt.Errorf("invalid weather lon: %w", err)
 	}
 
 	return Config{
