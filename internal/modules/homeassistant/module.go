@@ -229,83 +229,78 @@ func (m *Module) HandleKey(id module.KeyID, event module.KeyEvent) error {
 		return nil
 	}
 
+	// Fire-and-forget: run HA calls in a goroutine so we never block the device listener.
 	// Key 0: Office toggle button
 	if len(m.resources.Keys) > 0 && id == m.resources.Keys[0] {
-		return m.toggleOfficeMode()
+		go m.toggleOfficeMode()
+		return nil
 	}
 
 	// Key 1: Ring Light toggle
 	if len(m.resources.Keys) > 1 && id == m.resources.Keys[1] {
-		return m.toggleRingLight()
+		go m.toggleRingLight()
+		return nil
 	}
 
 	return nil
 }
 
 // toggleOfficeMode toggles between office time and quittin time based on office light state.
-func (m *Module) toggleOfficeMode() error {
+func (m *Module) toggleOfficeMode() {
 	state := m.getOfficeLightState()
 
 	if state.On {
-		// Light is on, run quittin time to turn off
 		log.Println("Executing Quittin Time script...")
-		err := m.client.CallService(context.Background(), "script", "turn_on", map[string]any{
+		err := m.client.CallService(m.Context(), "script", "turn_on", map[string]any{
 			"entity_id": "script.quittin_time",
 		})
 		if err != nil {
 			log.Printf("Failed to execute Quittin Time: %v", err)
-			return err
+			return
 		}
 		log.Println("Quittin Time script executed successfully")
 	} else {
-		// Light is off, run office time to turn on
 		log.Println("Executing Office Time script...")
-		err := m.client.CallService(context.Background(), "script", "turn_on", map[string]any{
+		err := m.client.CallService(m.Context(), "script", "turn_on", map[string]any{
 			"entity_id": "script.office_time",
 		})
 		if err != nil {
 			log.Printf("Failed to execute Office Time: %v", err)
-			return err
+			return
 		}
 		log.Println("Office Time script executed successfully")
 	}
-
-	return nil
 }
 
 // toggleRingLight toggles the ring light on/off.
-func (m *Module) toggleRingLight() error {
+func (m *Module) toggleRingLight() {
 	log.Println("Toggling ring light...")
 
-	err := m.client.CallService(context.Background(), "light", "toggle", map[string]any{
+	err := m.client.CallService(m.Context(), "light", "toggle", map[string]any{
 		"entity_id": m.config.RingLightEntity,
 	})
 	if err != nil {
 		log.Printf("Failed to toggle ring light: %v", err)
-		return err
+		return
 	}
 
 	log.Println("Ring light toggled")
-	return nil
 }
 
 // adjustRingLightBrightness adjusts the ring light brightness by a delta.
-func (m *Module) adjustRingLightBrightness(delta int8) error {
+func (m *Module) adjustRingLightBrightness(delta int8) {
 	// Each dial tick adjusts brightness by ~10% (25 out of 255)
 	step := int(delta) * 25
 
 	log.Printf("Adjusting ring light brightness by %d", step)
 
-	err := m.client.CallService(context.Background(), "light", "turn_on", map[string]any{
+	err := m.client.CallService(m.Context(), "light", "turn_on", map[string]any{
 		"entity_id":       m.config.RingLightEntity,
 		"brightness_step": step,
 	})
 	if err != nil {
 		log.Printf("Failed to adjust ring light brightness: %v", err)
-		return err
 	}
-
-	return nil
 }
 
 // HandleDial processes dial events.
@@ -319,9 +314,10 @@ func (m *Module) HandleDial(id module.DialID, event module.DialEvent) error {
 		return nil
 	}
 
-	// Dial 0: Ring Light brightness
+	// Dial 0: Ring Light brightness (fire-and-forget)
 	if len(m.resources.Dials) > 0 && id == m.resources.Dials[0] {
-		return m.adjustRingLightBrightness(event.Delta)
+		go m.adjustRingLightBrightness(event.Delta)
+		return nil
 	}
 
 	return nil
