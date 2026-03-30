@@ -1,6 +1,7 @@
 # Go
 .go/
 bin/
+/belowdeck
 
 # Nix
 result

@@ -48,8 +48,27 @@ type StreamPayload struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// startMediaStream runs the media-control stream and updates state.
+// startMediaStream runs the media-control stream with automatic reconnection.
 func (m *Module) startMediaStream(ctx context.Context) {
+	for {
+		m.runMediaStream(ctx)
+
+		// Don't reconnect if context is cancelled
+		if ctx.Err() != nil {
+			return
+		}
+
+		log.Println("media-control stream exited, reconnecting in 2s...")
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// runMediaStream runs a single media-control stream session.
+func (m *Module) runMediaStream(ctx context.Context) {
 	cmd := exec.CommandContext(ctx, "media-control", "stream", "--micros")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -135,6 +154,9 @@ func mergePayloadMap(dst *NowPlaying, src map[string]interface{}) {
 		dst.ArtworkMime = v
 	}
 	if v, ok := src["bundleIdentifier"].(string); ok {
+		dst.BundleIdentifier = v
+	}
+	if v, ok := src["parentApplicationBundleIdentifier"].(string); ok {
 		dst.BundleIdentifier = v
 	}
 }
