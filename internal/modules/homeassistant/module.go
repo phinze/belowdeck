@@ -292,6 +292,21 @@ func (m *Module) adjustRingLightBrightness(delta int8) {
 	// Each dial tick adjusts brightness by ~10% (25 out of 255)
 	step := int(delta) * 25
 
+	state := m.getRingLightState()
+
+	// If dialing down and current brightness would hit zero, turn off instead.
+	// HA's brightness_step clamps at 1 and won't turn the light off.
+	if step < 0 && state.On && state.Brightness != nil && int(*state.Brightness)+step <= 0 {
+		log.Printf("Brightness would reach 0, turning off ring light")
+		err := m.client.CallService(m.Context(), "light", "turn_off", map[string]any{
+			"entity_id": m.config.RingLightEntity,
+		})
+		if err != nil {
+			log.Printf("Failed to turn off ring light: %v", err)
+		}
+		return
+	}
+
 	log.Printf("Adjusting ring light brightness by %d", step)
 
 	err := m.client.CallService(m.Context(), "light", "turn_on", map[string]any{

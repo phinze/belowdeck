@@ -172,8 +172,10 @@ func (m *Module) renderRingLightButton() image.Image {
 
 	if state.On {
 		// Scale brightness (0-255) to color intensity
-		brightness := state.Brightness
-		if brightness == 0 {
+		var brightness uint8
+		if state.Brightness != nil {
+			brightness = *state.Brightness
+		} else {
 			brightness = 255 // Default to full if on but no brightness reported
 		}
 		// Create a warm white color scaled by brightness

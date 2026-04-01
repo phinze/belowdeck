@@ -13,7 +13,7 @@ import (
 // LightState represents the state of a light entity.
 type LightState struct {
 	On         bool
-	Brightness uint8 // 0-255
+	Brightness *uint8 // 0-255, nil if not reported
 }
 
 // Client is a Home Assistant API client.
@@ -108,7 +108,8 @@ func (c *Client) GetLightState(ctx context.Context, entityID string) (LightState
 	}
 
 	if data.Attributes.Brightness != nil {
-		state.Brightness = uint8(*data.Attributes.Brightness)
+		b := uint8(*data.Attributes.Brightness)
+		state.Brightness = &b
 	}
 
 	return state, nil
