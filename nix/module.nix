@@ -60,6 +60,15 @@ in
   config = mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
 
+    # Copy the binary to a stable path so macOS TCC (Input Monitoring)
+    # doesn't create a new privacy entry on every nix rebuild.
+    # TCC tracks permissions by binary path, and each rebuild produces
+    # a new /nix/store/<hash> path.
+    system.activationScripts.postActivation.text = ''
+      install -d /usr/local/bin
+      cp -f ${cfg.package}/bin/belowdeck /usr/local/bin/belowdeck
+    '';
+
     launchd.user.agents.belowdeck = {
       path = [
         "/usr/bin"
@@ -71,7 +80,7 @@ in
       ];
       serviceConfig = {
         ProgramArguments = [
-          "${cfg.package}/bin/belowdeck"
+          "/usr/local/bin/belowdeck"
         ];
         EnvironmentVariables = {
           BELOWDECK_CONFIG = "${configFile}";
