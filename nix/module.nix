@@ -64,9 +64,15 @@ in
     # doesn't create a new privacy entry on every nix rebuild.
     # TCC tracks permissions by binary path, and each rebuild produces
     # a new /nix/store/<hash> path.
+    #
+    # The codesign step replaces the linker-signed signature with a
+    # proper ad-hoc one. taskgated rejects linker-signed binaries that
+    # carry com.apple.provenance (set automatically when copying out of
+    # /nix/store), causing SIGKILL at exec.
     system.activationScripts.postActivation.text = ''
       install -d /usr/local/bin
       cp -f ${cfg.package}/bin/belowdeck /usr/local/bin/belowdeck
+      /usr/bin/codesign --force --sign - /usr/local/bin/belowdeck
     '';
 
     launchd.user.agents.belowdeck = {
