@@ -310,7 +310,13 @@ func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, w
 	}()
 
 	// If parent context is cancelled (shutdown signal), force exit
-	// since device.Close() may block indefinitely
+	// since device.Close() may block indefinitely.
+	//
+	// If close times out, the underlying usbhid runloop is wedged and
+	// the Listen goroutine will never unblock from its inputCh/disconnectCh
+	// select. Reconnecting in-process leaks one Listen goroutine (holding
+	// IOKit resources) per cycle, eventually wedging enumeration entirely.
+	// Exit instead and let launchd respawn cleanly.
 	select {
 	case <-ctx.Done():
 		log.Println("Exiting...")
@@ -318,8 +324,7 @@ func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, w
 	case <-closeDone:
 		// Device closed cleanly
 	case <-time.After(3 * time.Second):
-		// Device close timed out - on wake, give it a bit more time
-		// then proceed anyway (might need to wait for device to reappear)
-		log.Println("Device close timed out")
+		log.Println("Device close timed out, exiting for clean respawn")
+		os.Exit(1)
 	}
 }
