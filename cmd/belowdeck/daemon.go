@@ -17,6 +17,7 @@ import (
 	"github.com/phinze/belowdeck/internal/config"
 	"github.com/phinze/belowdeck/internal/coordinator"
 	"github.com/phinze/belowdeck/internal/device"
+	"github.com/phinze/belowdeck/internal/hidcheck"
 	"github.com/phinze/belowdeck/internal/module"
 	"github.com/phinze/belowdeck/internal/modules/github"
 	"github.com/phinze/belowdeck/internal/modules/homeassistant"
@@ -175,6 +176,10 @@ func tryGetDeviceWithTimeout(timeout time.Duration) *streamdeck.Device {
 
 	select {
 	case r := <-ch:
+		// Every probe enumerates every HID device on the machine, which is
+		// exactly where the usbhid leak lived. Count after each one so a
+		// regression shows up in the log instead of as a dead keyboard.
+		hidcheck.Check()
 		if r.err != nil {
 			return nil
 		}
@@ -468,7 +473,10 @@ func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, w
 		log.Println("Exiting...")
 		os.Exit(0)
 	case <-closeDone:
-		// Device closed cleanly
+		// Device closed cleanly. This is the other place a leak can hide:
+		// each wake cycles the deck through open and close, and a close
+		// that doesn't release its user client adds one per wake.
+		hidcheck.Log("after device close")
 	case <-time.After(3 * time.Second):
 		log.Println("Device close timed out, exiting for clean respawn")
 		os.Exit(1)
