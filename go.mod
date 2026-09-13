@@ -2,6 +2,9 @@ module github.com/phinze/belowdeck
 
 go 1.25.5
 
+// flake.nix pins a vendorHash over these modules. After changing anything
+// here, run `nix build` and paste the new hash it reports into flake.nix
+// before pushing, or the nix-config deploy fails on a hash mismatch.
 require (
 	github.com/ebitengine/purego v0.10.2
 	github.com/hajimehoshi/ebiten/v2 v2.9.8
@@ -14,6 +17,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	rafaelmartins.com/p/streamdeck v0.0.0-20260905040856-709e442a380b
 )
+
+require rafaelmartins.com/p/usbhid v0.0.0-20260903160318-2edd824d3b06
 
 require (
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
@@ -28,5 +33,4 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	rafaelmartins.com/p/usbhid v0.0.0-20260903160318-2edd824d3b06 // indirect
 )
