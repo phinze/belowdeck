@@ -239,23 +239,11 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}, deviceAr
 			// Quiet on purpose: this fires on a timer, and tryGetDeviceWithTimeout
 			// logs the failures that are actually worth reading.
 		case <-wakeCh:
-			// After wake, USB devices may take several seconds to enumerate.
-			// Retry multiple times with short delays instead of just checking once.
+			// A deck that is still enumerating after wake will fire
+			// deviceArrivedCh when it lands, and the timer below covers the
+			// rest, so one probe is enough here.
 			log.Println("Wake signal received, probing for device...")
-			for i := 0; i < 10; i++ {
-				if dev := tryGetDeviceWithTimeout(deviceTimeout); dev != nil {
-					log.Println("Device connected!")
-					return device.NewHardware(dev)
-				}
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(500 * time.Millisecond):
-				}
-			}
-			log.Println("Device not found after wake, resuming wait...")
 			retryDelay = retryMin
-			continue
 		}
 
 		if dev := tryGetDeviceWithTimeout(deviceTimeout); dev != nil {
