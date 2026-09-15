@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"log"
@@ -109,7 +110,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		// even after GetDevice succeeds. Give the device a moment to fully initialize.
 		time.Sleep(500 * time.Millisecond)
 
-		runWithDevice(ctx, cfg, dev, wakeCh)
+		runWithDevice(ctx, cfg, dev, wakeCh, deviceArrivedCh)
 
 		// Check if we should exit or wait for reconnect
 		select {
@@ -323,11 +324,98 @@ func initBackoff(failures int) time.Duration {
 	return d
 }
 
+// initBrightnessAttempts bounds the retry loop in initDevice. The attempts
+// fail fast when the endpoint answers at all, so the loop stays well inside
+// the init timeout; when it hangs instead, the timeout is what ends it.
+const (
+	initBrightnessAttempts   = 3
+	initBrightnessRetryDelay = 300 * time.Millisecond
+)
+
+// initTarget is the slice of device.Device that initDevice needs, kept
+// narrow so tests can drive it with a fake.
+type initTarget interface {
+	SetBrightness(perc byte) error
+	ForEachKey(cb func(device.KeyID) error) error
+	ClearKey(key device.KeyID) error
+}
+
+// initDevice puts a freshly opened deck into a known state. Brightness is the
+// write that matters: it is a feature report on the control endpoint, and it
+// is the only brightness write the daemon ever makes, so if it does not land
+// the panel stays dark no matter how many key images follow. A deck fresh out
+// of USB suspend may need a moment before that endpoint answers, so give it a
+// few tries before deciding it is gone.
+func initDevice(dev initTarget) error {
+	var err error
+	for attempt := 1; attempt <= initBrightnessAttempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(initBrightnessRetryDelay)
+		}
+		if err = dev.SetBrightness(80); err == nil {
+			break
+		}
+		log.Printf("Set brightness failed (attempt %d/%d): %v", attempt, initBrightnessAttempts, err)
+	}
+	if err != nil {
+		return fmt.Errorf("set brightness: %w", err)
+	}
+	if err := dev.ForEachKey(func(key device.KeyID) error {
+		return dev.ClearKey(key)
+	}); err != nil {
+		return fmt.Errorf("clear keys: %w", err)
+	}
+	return nil
+}
+
+// exitAfterInitFailure records the failure, says as much as the streak
+// warrants, and ends the process so launchd can supply a fresh one. It does
+// not return.
+func exitAfterInitFailure(err error, deviceArrivedCh <-chan struct{}) {
+	failures := noteInitFailure()
+	if failures >= initFailureLoud {
+		log.Printf("Device init failed %d times in a row, each on a fresh process (last: %v). "+
+			"The Stream Deck's HID endpoint is wedged and respawning will not clear it: "+
+			"unplug the device and plug it back in.", failures, err)
+	} else {
+		log.Printf("Device init failed (%v), exiting for clean respawn", err)
+	}
+	if d := initBackoff(failures); d > 0 {
+		log.Printf("Backing off %s before exiting", d)
+		if backoffUntilArrival(d, deviceArrivedCh) {
+			log.Println("USB device arrived during backoff, exiting now for respawn")
+		}
+	}
+	os.Exit(1)
+}
+
+// backoffUntilArrival sleeps for d unless a USB device arrives first, and
+// reports whether it did. The backoff exists because respawning cannot clear
+// a wedged deck, and a replug is the one thing that can, so a fresh
+// enumeration is exactly the signal to stop waiting. The first message in a
+// backoff that ended two minutes after the human had already replugged was
+// still "unplug the device".
+func backoffUntilArrival(d time.Duration, deviceArrivedCh <-chan struct{}) bool {
+	// The channel holds one buffered edge, and the startup probe usually
+	// leaves the second interface's arrival sitting in it. Only a new edge
+	// counts.
+	select {
+	case <-deviceArrivedCh:
+	default:
+	}
+	select {
+	case <-deviceArrivedCh:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
 // runWithDevice runs the coordinator with the given device until disconnect, wake, or context cancel.
-func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, wakeCh <-chan struct{}) {
+func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, wakeCh <-chan struct{}, deviceArrivedCh <-chan struct{}) {
 	log.Printf("Connected to: %s", dev.GetModelName())
 
-	// Set brightness and clear keys.
+	// Put the deck into a known state: backlight on, keys blank.
 	//
 	// These are the first writes after open, and they can block forever:
 	// usbhid's setReport waits on a completion callback with no timeout, and a
@@ -343,33 +431,27 @@ func runWithDevice(ctx context.Context, cfg *config.Config, dev device.Device, w
 	// until the deck was physically unplugged. So count the streak, slow down
 	// once it is clear that respawning is not helping, and say the one thing
 	// that actually fixes it.
-	initDone := make(chan struct{})
+	//
+	// A wedged deck does not always hang, either. It has also answered the
+	// brightness report promptly with kIOReturnNotResponding, and with that
+	// error unchecked the daemon logged Ready and spent the rest of the day
+	// streaming key images to a panel whose backlight never came on. A failed
+	// init is the same situation as a hung one and takes the same exit.
+	initDone := make(chan error, 1)
 	go func() {
-		dev.SetBrightness(80)
-		dev.ForEachKey(func(key device.KeyID) error {
-			return dev.ClearKey(key)
-		})
-		close(initDone)
+		initDone <- initDevice(dev)
 	}()
 
+	var initErr error
 	select {
-	case <-initDone:
-		clearInitFailures()
+	case initErr = <-initDone:
 	case <-time.After(5 * time.Second):
-		failures := noteInitFailure()
-		if failures >= initFailureLoud {
-			log.Printf("Device init timed out %d times in a row, each on a fresh process. "+
-				"The Stream Deck's HID endpoint is wedged and respawning will not clear it: "+
-				"unplug the device and plug it back in.", failures)
-		} else {
-			log.Println("Device init timed out, exiting for clean respawn")
-		}
-		if d := initBackoff(failures); d > 0 {
-			log.Printf("Backing off %s before exiting", d)
-			time.Sleep(d)
-		}
-		os.Exit(1)
+		initErr = errors.New("timed out")
 	}
+	if initErr != nil {
+		exitAfterInitFailure(initErr, deviceArrivedCh)
+	}
+	clearInitFailures()
 
 	// Create coordinator and modules fresh for each connection
 	coord := coordinator.New(dev)
