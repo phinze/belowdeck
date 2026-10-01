@@ -23,6 +23,9 @@ const (
 	OverlayReviewRequested
 )
 
+// itemsPerPage is how many PRs fit on the overlay at once, one per key.
+const itemsPerPage = 8
+
 // Module implements the GitHub PR stats module.
 type Module struct {
 	module.BaseModule
@@ -31,13 +34,11 @@ type Module struct {
 	client  *Client
 	enabled bool
 
-	// State for my PRs (Key3)
-	mu     sync.RWMutex
-	stats  PRStats
-	prList []PRInfo
-
-	// State for review-requested PRs (Key4)
-	reviewStats  ReviewStats
+	// PR lists for my PRs (Key3) and review-requested PRs (Key4). Key3's
+	// counts are derived from prList on each fetch.
+	mu           sync.RWMutex
+	stats        PRStats
+	prList       []PRInfo
 	reviewPRList []PRInfo
 
 	// Overlay state
@@ -127,56 +128,27 @@ func (m *Module) pollStats(ctx context.Context) {
 	}
 }
 
-// fetchStats fetches the current PR stats for both my PRs and review-requested PRs.
+// fetchStats refreshes both PR lists. A failed fetch keeps the previous list
+// (and its counts) rather than blanking the keys.
 func (m *Module) fetchStats(ctx context.Context) {
-	// Fetch my PR stats
-	stats, err := m.client.GetMyPRStats(ctx)
-	if err != nil {
-		log.Printf("Failed to fetch GitHub PR stats: %v", err)
-		return
-	}
-
-	// Also fetch PR list for overlay (includes CI status)
 	prList, err := m.client.GetMyPRList(ctx)
 	if err != nil {
 		log.Printf("Failed to fetch GitHub PR list: %v", err)
-		// Continue with stats even if list fails
+	} else {
+		m.mu.Lock()
+		m.prList = prList
+		m.stats = summarize(prList)
+		m.mu.Unlock()
 	}
 
-	// Count CI failures and drafts from PR list
-	for _, pr := range prList {
-		if pr.CI == CIStatusFailed {
-			stats.CIFailed++
-		}
-		if pr.IsDraft {
-			stats.Draft++
-		}
-	}
-
-	// Fetch review-requested stats
-	reviewStats, err := m.client.GetReviewRequestedStats(ctx)
-	if err != nil {
-		log.Printf("Failed to fetch review-requested stats: %v", err)
-		// Continue with partial data
-	}
-
-	// Fetch review-requested PR list
 	reviewPRList, err := m.client.GetReviewRequestedPRList(ctx)
 	if err != nil {
 		log.Printf("Failed to fetch review-requested PR list: %v", err)
-		// Continue with partial data
-	}
-
-	m.mu.Lock()
-	m.stats = stats
-	if prList != nil {
-		m.prList = prList
-	}
-	m.reviewStats = reviewStats
-	if reviewPRList != nil {
+	} else {
+		m.mu.Lock()
 		m.reviewPRList = reviewPRList
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 }
 
 // getStats returns the current PR stats.
@@ -186,25 +158,21 @@ func (m *Module) getStats() PRStats {
 	return m.stats
 }
 
-// getPRList returns the current PR list.
-func (m *Module) getPRList() []PRInfo {
+// getReviewCount returns how many PRs are awaiting my review.
+func (m *Module) getReviewCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.prList
+	return len(m.reviewPRList)
 }
 
-// getReviewStats returns the current review-requested stats.
-func (m *Module) getReviewStats() ReviewStats {
+// overlayState returns the PR list for the active overlay and the current page.
+func (m *Module) overlayState() ([]PRInfo, int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.reviewStats
-}
-
-// getReviewPRList returns the current review-requested PR list.
-func (m *Module) getReviewPRList() []PRInfo {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.reviewPRList
+	if m.overlayType == OverlayReviewRequested {
+		return m.reviewPRList, m.currentPage
+	}
+	return m.prList, m.currentPage
 }
 
 // RenderKeys returns images for the module's keys.
@@ -269,23 +237,8 @@ func (m *Module) HandleOverlayDial(id module.DialID, event module.DialEvent) err
 		return nil
 	}
 
-	// Get the appropriate PR list based on overlay type
-	m.mu.RLock()
-	overlayType := m.overlayType
-	m.mu.RUnlock()
-
-	var prList []PRInfo
-	if overlayType == OverlayReviewRequested {
-		prList = m.getReviewPRList()
-	} else {
-		prList = m.getPRList()
-	}
-
-	const itemsPerPage = 8
-	totalPages := (len(prList) + itemsPerPage - 1) / itemsPerPage
-	if totalPages == 0 {
-		totalPages = 1
-	}
+	prList, _ := m.overlayState()
+	totalPages := pageCount(len(prList))
 
 	switch event.Type {
 	case module.DialRotate:
@@ -328,22 +281,9 @@ func (m *Module) HandleOverlayKey(id module.KeyID, event module.KeyEvent) error 
 		return nil
 	}
 
-	// Get the appropriate PR list based on overlay type
-	m.mu.RLock()
-	overlayType := m.overlayType
-	currentPage := m.currentPage
-	m.mu.RUnlock()
-
-	var prList []PRInfo
-	if overlayType == OverlayReviewRequested {
-		prList = m.getReviewPRList()
-	} else {
-		prList = m.getPRList()
-	}
+	prList, currentPage := m.overlayState()
 
 	// Map key to PR index (Key1-Key8 map to PRs on current page)
-	// All 8 keys now show PRs (back is via dial click)
-	const itemsPerPage = 8
 	keyIndex := int(id) - 1 // Key1=1, so subtract 1 for 0-indexed
 	prIndex := currentPage*itemsPerPage + keyIndex
 	if prIndex >= 0 && prIndex < len(prList) {
@@ -379,46 +319,22 @@ func (m *Module) openURL(url string) {
 
 // IsOverlayActive returns true if the PR list overlay is visible.
 func (m *Module) IsOverlayActive() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	if m.overlayType == OverlayNone {
-		return false
-	}
-
-	// Check if overlay has expired
-	if time.Now().After(m.overlayExpiry) {
-		// Need to acquire write lock to update
-		m.mu.RUnlock()
-		m.mu.Lock()
+	if m.overlayType != OverlayNone && time.Now().After(m.overlayExpiry) {
 		m.overlayType = OverlayNone
-		m.mu.Unlock()
-		m.mu.RLock()
-		return false
 	}
-
-	return true
+	return m.overlayType != OverlayNone
 }
 
 // RenderOverlayKeys returns images for all 8 keys showing PR list with pagination.
 func (m *Module) RenderOverlayKeys() map[module.KeyID]image.Image {
 	keys := make(map[module.KeyID]image.Image)
 
-	// Get the appropriate PR list based on overlay type
-	m.mu.RLock()
-	overlayType := m.overlayType
-	currentPage := m.currentPage
-	m.mu.RUnlock()
+	prList, currentPage := m.overlayState()
 
-	var prList []PRInfo
-	if overlayType == OverlayReviewRequested {
-		prList = m.getReviewPRList()
-	} else {
-		prList = m.getPRList()
-	}
-
-	// All 8 keys show PRs (back is now via dial click)
-	const itemsPerPage = 8
+	// All 8 keys show PRs (back is via dial click)
 	prKeys := []module.KeyID{
 		module.Key1, module.Key2, module.Key3, module.Key4,
 		module.Key5, module.Key6, module.Key7, module.Key8,
@@ -439,18 +355,7 @@ func (m *Module) RenderOverlayKeys() map[module.KeyID]image.Image {
 
 // RenderOverlayStrip returns the touch strip image for the overlay.
 func (m *Module) RenderOverlayStrip() image.Image {
-	// Get the appropriate PR list based on overlay type
-	m.mu.RLock()
-	overlayType := m.overlayType
-	currentPage := m.currentPage
-	m.mu.RUnlock()
-
-	var prList []PRInfo
-	if overlayType == OverlayReviewRequested {
-		prList = m.getReviewPRList()
-	} else {
-		prList = m.getPRList()
-	}
+	prList, currentPage := m.overlayState()
 
 	return m.renderOverlayStripWithPRs(prList, currentPage)
 }

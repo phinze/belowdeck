@@ -1,13 +1,13 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -15,24 +15,22 @@ import (
 	"time"
 )
 
-// PRStats holds counts of PRs in different states (for authored PRs).
+// PRStats holds counts of my PRs per status, plus how many have failing CI.
+// Every PR lands in exactly one status bucket, so the buckets sum to the
+// number of open PRs.
 type PRStats struct {
-	WaitingForReview int
+	Draft            int
+	Waiting          int
 	Approved         int
 	ChangesRequested int
 	CIFailed         int
-	Draft            int
 }
 
-// ReviewStats holds the count of PRs awaiting my review.
-type ReviewStats struct {
-	Total int
-}
-
-// PRStatus represents the review status of a PR.
+// PRStatus is the single bucket a PR is shown in.
 type PRStatus string
 
 const (
+	PRStatusDraft    PRStatus = "draft"
 	PRStatusWaiting  PRStatus = "waiting"
 	PRStatusApproved PRStatus = "approved"
 	PRStatusChanges  PRStatus = "changes"
@@ -49,29 +47,74 @@ const (
 
 // PRInfo holds information about a single PR.
 type PRInfo struct {
-	Title   string
-	Repo    string
-	Number  int
-	Status  PRStatus
-	CI      CIStatus
-	URL     string
-	HeadSHA string // For fetching CI status
-	IsDraft bool
+	Title  string
+	Repo   string
+	Number int
+	Status PRStatus
+	CI     CIStatus
+	URL    string
+}
+
+// classify picks the one bucket a PR belongs in. Draft wins over any review
+// decision: an approved draft still can't merge, so it isn't "OK" yet.
+func classify(isDraft bool, reviewDecision string) PRStatus {
+	switch {
+	case isDraft:
+		return PRStatusDraft
+	case reviewDecision == "CHANGES_REQUESTED":
+		return PRStatusChanges
+	case reviewDecision == "APPROVED":
+		return PRStatusApproved
+	default:
+		return PRStatusWaiting
+	}
+}
+
+// ciStatus maps a statusCheckRollup state onto our three CI states. The
+// rollup covers both legacy commit statuses and check runs, so GitHub Actions
+// results show up here.
+func ciStatus(rollupState string) CIStatus {
+	switch rollupState {
+	case "SUCCESS":
+		return CIStatusPassed
+	case "FAILURE", "ERROR":
+		return CIStatusFailed
+	default:
+		return CIStatusPending
+	}
+}
+
+// summarize counts a PR list into stats. The key and the overlay both derive
+// from the same list through this, so they can't disagree.
+func summarize(prs []PRInfo) PRStats {
+	var stats PRStats
+	for _, pr := range prs {
+		switch pr.Status {
+		case PRStatusDraft:
+			stats.Draft++
+		case PRStatusApproved:
+			stats.Approved++
+		case PRStatusChanges:
+			stats.ChangesRequested++
+		default:
+			stats.Waiting++
+		}
+		if pr.CI == CIStatusFailed {
+			stats.CIFailed++
+		}
+	}
+	return stats
 }
 
 // Client is a GitHub API client.
 type Client struct {
 	token      string
+	endpoint   string // GraphQL URL; tests point this at a fake
 	httpClient *http.Client
-	username   string // cached username
-
-	// sem admits one request at a time; see do.
-	sem chan struct{}
 }
 
 // NewClient creates a new GitHub API client using the gh CLI token.
 func NewClient() (*Client, error) {
-	// Get token from gh CLI
 	cmd := exec.Command("gh", "auth", "token")
 	output, err := cmd.Output()
 	if err != nil {
@@ -84,106 +127,179 @@ func NewClient() (*Client, error) {
 	}
 
 	return &Client{
-		token: token,
+		token:    token,
+		endpoint: "https://api.github.com/graphql",
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		sem: make(chan struct{}, 1),
 	}, nil
 }
 
-// GetMyPRStats fetches stats about the authenticated user's PRs.
-func (c *Client) GetMyPRStats(ctx context.Context) (PRStats, error) {
-	var stats PRStats
-
-	// Get username first
-	username, err := c.getAuthenticatedUser(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("failed to get username: %w", err)
-	}
-
-	// Fetch counts in parallel
-	// We get total, approved, and changes_requested, then calculate waiting
-	type result struct {
-		field string
-		count int
-		err   error
-	}
-	results := make(chan result, 3)
-
-	queries := []struct {
-		field string
-		query string
-	}{
-		{"total", fmt.Sprintf("is:pr author:%s is:open", username)},
-		{"approved", fmt.Sprintf("is:pr author:%s is:open review:approved", username)},
-		{"changes", fmt.Sprintf("is:pr author:%s is:open review:changes_requested", username)},
-	}
-
-	for _, q := range queries {
-		go func(field, query string) {
-			count, err := c.searchPRCount(ctx, query)
-			results <- result{field, count, err}
-		}(q.field, q.query)
-	}
-
-	var total int
-	for range 3 {
-		r := <-results
-		if r.err != nil {
-			return stats, r.err
-		}
-		switch r.field {
-		case "total":
-			total = r.count
-		case "approved":
-			stats.Approved = r.count
-		case "changes":
-			stats.ChangesRequested = r.count
-		}
-	}
-
-	// Waiting = total - approved - changes_requested
-	stats.WaitingForReview = total - stats.Approved - stats.ChangesRequested
-
-	return stats, nil
+// GetMyPRList fetches my open PRs with review and CI status.
+func (c *Client) GetMyPRList(ctx context.Context) ([]PRInfo, error) {
+	return c.searchPRs(ctx, "is:pr is:open author:@me archived:false")
 }
 
-// do sends a request with the standard headers, serialized against every other
-// request from this client.
-//
-// GitHub's secondary rate limit is about concurrency rather than volume: the
-// docs ask callers to "make requests for a single user or client ID serially,"
-// and this client used to do the opposite. A refresh fans out three searches
-// for PR stats, three more for the list, then one request per PR for CI status
-// and another per PR for details, all on their own goroutines. At eight open
-// PRs that is roughly two dozen requests landing at once, which GitHub started
-// refusing outright with a 403 once the PR count grew past the threshold.
-//
-// Admitting one request at a time costs a couple of seconds per refresh, which
-// is nothing against a two minute cadence, and keeps us inside the documented
-// contract no matter how many PRs are open.
-func (c *Client) do(req *http.Request) (*http.Response, error) {
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	select {
-	case c.sem <- struct{}{}:
-	case <-req.Context().Done():
-		return nil, req.Context().Err()
+// GetReviewRequestedPRList fetches open PRs awaiting my review.
+func (c *Client) GetReviewRequestedPRList(ctx context.Context) ([]PRInfo, error) {
+	prs, err := c.searchPRs(ctx, "is:pr is:open review-requested:@me archived:false")
+	if err != nil {
+		return nil, err
 	}
-	defer func() { <-c.sem }()
 
-	return c.httpClient.Do(req)
+	// These are waiting on me regardless of what other reviewers decided, so
+	// only draft-ness is worth distinguishing.
+	for i := range prs {
+		if prs[i].Status != PRStatusDraft {
+			prs[i].Status = PRStatusWaiting
+		}
+	}
+	return prs, nil
+}
+
+// searchQuery pulls everything the module shows in one round trip per page.
+//
+// This replaces a REST fan-out of three searches plus two requests per PR (one
+// for draft state and head SHA, one for CI). That fan-out tripped GitHub's
+// secondary rate limit as PR counts grew, assembled one view from several
+// separately-timed queries, and read CI from the legacy combined status
+// endpoint, which never sees GitHub Actions check runs.
+const searchQuery = `query($q: String!, $cursor: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        title
+        number
+        url
+        isDraft
+        reviewDecision
+        repository { nameWithOwner }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+  }
+}`
+
+type searchResponse struct {
+	Search struct {
+		PageInfo struct {
+			HasNextPage bool   `json:"hasNextPage"`
+			EndCursor   string `json:"endCursor"`
+		} `json:"pageInfo"`
+		Nodes []struct {
+			Title          string `json:"title"`
+			Number         int    `json:"number"`
+			URL            string `json:"url"`
+			IsDraft        bool   `json:"isDraft"`
+			ReviewDecision string `json:"reviewDecision"`
+			Repository     struct {
+				NameWithOwner string `json:"nameWithOwner"`
+			} `json:"repository"`
+			Commits struct {
+				Nodes []struct {
+					Commit struct {
+						StatusCheckRollup *struct {
+							State string `json:"state"`
+						} `json:"statusCheckRollup"`
+					} `json:"commit"`
+				} `json:"nodes"`
+			} `json:"commits"`
+		} `json:"nodes"`
+	} `json:"search"`
+}
+
+// searchPRs runs a PR search, following pages until every match is in hand.
+func (c *Client) searchPRs(ctx context.Context, query string) ([]PRInfo, error) {
+	var prs []PRInfo
+	var cursor *string
+
+	for {
+		var resp searchResponse
+		vars := map[string]any{"q": query, "cursor": cursor}
+		if err := c.graphql(ctx, searchQuery, vars, &resp); err != nil {
+			return nil, err
+		}
+
+		for _, n := range resp.Search.Nodes {
+			rollup := ""
+			if len(n.Commits.Nodes) > 0 && n.Commits.Nodes[0].Commit.StatusCheckRollup != nil {
+				rollup = n.Commits.Nodes[0].Commit.StatusCheckRollup.State
+			}
+			prs = append(prs, PRInfo{
+				Title:  n.Title,
+				Repo:   n.Repository.NameWithOwner,
+				Number: n.Number,
+				Status: classify(n.IsDraft, n.ReviewDecision),
+				CI:     ciStatus(rollup),
+				URL:    n.URL,
+			})
+		}
+
+		if !resp.Search.PageInfo.HasNextPage {
+			break
+		}
+		next := resp.Search.PageInfo.EndCursor
+		cursor = &next
+	}
+
+	sortPRsByRepo(prs)
+	return prs, nil
+}
+
+// graphql posts a query and decodes its data into out.
+func (c *Client) graphql(ctx context.Context, query string, vars map[string]any, out any) error {
+	body, err := json.Marshal(map[string]any{"query": query, "variables": vars})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return apiError(resp)
+	}
+
+	// GraphQL reports query failures with a 200 and an errors array, so a
+	// clean status line isn't enough to trust the data.
+	var envelope struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if len(envelope.Errors) > 0 {
+		msgs := make([]string, len(envelope.Errors))
+		for i, e := range envelope.Errors {
+			msgs[i] = e.Message
+		}
+		return errors.New("GraphQL error: " + strings.Join(msgs, "; "))
+	}
+
+	return json.Unmarshal(envelope.Data, out)
 }
 
 // apiError builds an error from a non-200 response.
 //
 // GitHub explains every refusal in the response body, and for throttling it
 // also names the exhausted budget in the rate limit headers. Reporting only
-// the status line, as this used to, turns a 403 into a guessing game: the
-// status alone cannot distinguish a scope problem from a primary rate limit
-// from a secondary one, and those want completely different fixes.
+// the status line turns a 403 into a guessing game: the status alone cannot
+// distinguish a scope problem from a primary rate limit from a secondary one,
+// and those want completely different fixes.
 func apiError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 
@@ -220,392 +336,21 @@ func apiError(resp *http.Response) error {
 	return errors.New(msg)
 }
 
-// getAuthenticatedUser returns the authenticated user's login (cached after first call).
-func (c *Client) getAuthenticatedUser(ctx context.Context) (string, error) {
-	// Return cached username if available
-	if c.username != "" {
-		return c.username, nil
+// shortRepo drops the owner from an owner/repo name.
+func shortRepo(repo string) string {
+	if idx := strings.LastIndex(repo, "/"); idx != -1 {
+		return repo[idx+1:]
 	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user", nil)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := c.do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", apiError(resp)
-	}
-
-	var user struct {
-		Login string `json:"login"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return "", err
-	}
-
-	// Cache the username
-	c.username = user.Login
-	return c.username, nil
-}
-
-// searchPRCount searches for PRs matching a query and returns the count.
-func (c *Client) searchPRCount(ctx context.Context, query string) (int, error) {
-	apiURL := "https://api.github.com/search/issues?per_page=1&q=" + url.QueryEscape(query)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	resp, err := c.do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, apiError(resp)
-	}
-
-	var result struct {
-		TotalCount int `json:"total_count"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
-	}
-
-	return result.TotalCount, nil
-}
-
-// GetMyPRList fetches a list of PRs with details including CI status.
-func (c *Client) GetMyPRList(ctx context.Context) ([]PRInfo, error) {
-	username, err := c.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get username: %w", err)
-	}
-
-	// Fetch all open PRs, approved PRs, and changes requested PRs in parallel
-	type result struct {
-		category string
-		prs      []PRInfo
-		err      error
-	}
-	results := make(chan result, 3)
-
-	queries := []struct {
-		category string
-		query    string
-	}{
-		{"all", fmt.Sprintf("is:pr author:%s is:open", username)},
-		{"approved", fmt.Sprintf("is:pr author:%s is:open review:approved", username)},
-		{"changes", fmt.Sprintf("is:pr author:%s is:open review:changes_requested", username)},
-	}
-
-	for _, q := range queries {
-		go func(category, query string) {
-			prs, err := c.searchPRs(ctx, query, PRStatusWaiting) // Status will be set later
-			results <- result{category, prs, err}
-		}(q.category, q.query)
-	}
-
-	var allPRs, approvedPRs, changesPRs []PRInfo
-	for range 3 {
-		r := <-results
-		if r.err != nil {
-			return nil, r.err
-		}
-		switch r.category {
-		case "all":
-			allPRs = r.prs
-		case "approved":
-			approvedPRs = r.prs
-		case "changes":
-			changesPRs = r.prs
-		}
-	}
-
-	// Build sets of approved and changes-requested PR URLs for quick lookup
-	approvedSet := make(map[string]bool)
-	for _, pr := range approvedPRs {
-		approvedSet[pr.URL] = true
-	}
-	changesSet := make(map[string]bool)
-	for _, pr := range changesPRs {
-		changesSet[pr.URL] = true
-	}
-
-	// Set correct status for each PR
-	for i := range allPRs {
-		if approvedSet[allPRs[i].URL] {
-			allPRs[i].Status = PRStatusApproved
-		} else if changesSet[allPRs[i].URL] {
-			allPRs[i].Status = PRStatusChanges
-		} else {
-			allPRs[i].Status = PRStatusWaiting
-		}
-	}
-
-	// Fetch CI status for all PRs in parallel
-	c.fetchCIStatuses(ctx, allPRs)
-
-	// Sort by repo name, then by PR number within each repo
-	sortPRsByRepo(allPRs)
-
-	return allPRs, nil
+	return repo
 }
 
 // sortPRsByRepo sorts PRs by repo name alphabetically, then by PR number.
 func sortPRsByRepo(prs []PRInfo) {
 	sort.Slice(prs, func(i, j int) bool {
-		// Compare repo names (just the repo part after /)
-		repoI := prs[i].Repo
-		if idx := strings.LastIndex(repoI, "/"); idx != -1 {
-			repoI = repoI[idx+1:]
-		}
-		repoJ := prs[j].Repo
-		if idx := strings.LastIndex(repoJ, "/"); idx != -1 {
-			repoJ = repoJ[idx+1:]
-		}
-
+		repoI, repoJ := shortRepo(prs[i].Repo), shortRepo(prs[j].Repo)
 		if repoI != repoJ {
 			return repoI < repoJ
 		}
-		// Same repo, sort by PR number
 		return prs[i].Number < prs[j].Number
 	})
-}
-
-// fetchCIStatuses fetches CI status for a list of PRs in parallel.
-func (c *Client) fetchCIStatuses(ctx context.Context, prs []PRInfo) {
-	if len(prs) == 0 {
-		return
-	}
-
-	type ciResult struct {
-		index int
-		ci    CIStatus
-	}
-	results := make(chan ciResult, len(prs))
-
-	for i, pr := range prs {
-		go func(idx int, pr PRInfo) {
-			ci := c.getCIStatus(ctx, pr.Repo, pr.HeadSHA)
-			results <- ciResult{idx, ci}
-		}(i, pr)
-	}
-
-	for range len(prs) {
-		r := <-results
-		prs[r.index].CI = r.ci
-	}
-}
-
-// getCIStatus fetches the combined CI status for a commit.
-func (c *Client) getCIStatus(ctx context.Context, repo, sha string) CIStatus {
-	if sha == "" {
-		return CIStatusPending
-	}
-
-	// Use the combined status endpoint
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/commits/%s/status", repo, sha)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return CIStatusPending
-	}
-
-	resp, err := c.do(req)
-	if err != nil {
-		return CIStatusPending
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return CIStatusPending
-	}
-
-	var status struct {
-		State string `json:"state"` // success, failure, pending, error
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return CIStatusPending
-	}
-
-	switch status.State {
-	case "success":
-		return CIStatusPassed
-	case "failure", "error":
-		return CIStatusFailed
-	default:
-		return CIStatusPending
-	}
-}
-
-// searchPRs searches for PRs matching a query and returns details including head SHA.
-func (c *Client) searchPRs(ctx context.Context, query string, status PRStatus) ([]PRInfo, error) {
-	apiURL := "https://api.github.com/search/issues?per_page=10&q=" + url.QueryEscape(query)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, apiError(resp)
-	}
-
-	var searchResult struct {
-		Items []struct {
-			Title         string `json:"title"`
-			Number        int    `json:"number"`
-			HTMLURL       string `json:"html_url"`
-			RepositoryURL string `json:"repository_url"`
-		} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&searchResult); err != nil {
-		return nil, err
-	}
-
-	var prs []PRInfo
-	for _, item := range searchResult.Items {
-		// Extract repo name from repository URL
-		// https://api.github.com/repos/owner/repo -> owner/repo
-		repoName := item.RepositoryURL
-		if idx := strings.Index(repoName, "/repos/"); idx != -1 {
-			repoName = repoName[idx+7:]
-		}
-
-		prs = append(prs, PRInfo{
-			Title:  item.Title,
-			Repo:   repoName,
-			Number: item.Number,
-			Status: status,
-			URL:    item.HTMLURL,
-		})
-	}
-
-	// Fetch head SHAs and draft status for all PRs in parallel
-	c.fetchPRDetails(ctx, prs)
-
-	return prs, nil
-}
-
-// fetchPRDetails fetches the head SHA and draft status for each PR in parallel.
-func (c *Client) fetchPRDetails(ctx context.Context, prs []PRInfo) {
-	if len(prs) == 0 {
-		return
-	}
-
-	type detailsResult struct {
-		index   int
-		details prDetails
-	}
-	results := make(chan detailsResult, len(prs))
-
-	for i, pr := range prs {
-		go func(idx int, pr PRInfo) {
-			details := c.getPRDetails(ctx, pr.Repo, pr.Number)
-			results <- detailsResult{idx, details}
-		}(i, pr)
-	}
-
-	for range len(prs) {
-		r := <-results
-		prs[r.index].HeadSHA = r.details.HeadSHA
-		prs[r.index].IsDraft = r.details.IsDraft
-	}
-}
-
-// prDetails holds extra details fetched from the PR API.
-type prDetails struct {
-	HeadSHA string
-	IsDraft bool
-}
-
-// getPRDetails fetches the head SHA and draft status for a specific PR.
-func (c *Client) getPRDetails(ctx context.Context, repo string, number int) prDetails {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d", repo, number)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return prDetails{}
-	}
-
-	resp, err := c.do(req)
-	if err != nil {
-		return prDetails{}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return prDetails{}
-	}
-
-	var pr struct {
-		Draft bool `json:"draft"`
-		Head  struct {
-			SHA string `json:"sha"`
-		} `json:"head"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		return prDetails{}
-	}
-
-	return prDetails{
-		HeadSHA: pr.Head.SHA,
-		IsDraft: pr.Draft,
-	}
-}
-
-// GetReviewRequestedStats fetches the count of PRs awaiting my review.
-func (c *Client) GetReviewRequestedStats(ctx context.Context) (ReviewStats, error) {
-	var stats ReviewStats
-
-	username, err := c.getAuthenticatedUser(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("failed to get username: %w", err)
-	}
-
-	// Query: is:open is:pr review-requested:{user} archived:false
-	query := fmt.Sprintf("is:open is:pr review-requested:%s archived:false", username)
-	count, err := c.searchPRCount(ctx, query)
-	if err != nil {
-		return stats, err
-	}
-
-	stats.Total = count
-	return stats, nil
-}
-
-// GetReviewRequestedPRList fetches PRs awaiting my review with details.
-func (c *Client) GetReviewRequestedPRList(ctx context.Context) ([]PRInfo, error) {
-	username, err := c.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get username: %w", err)
-	}
-
-	// Query: is:open is:pr review-requested:{user} archived:false
-	query := fmt.Sprintf("is:open is:pr review-requested:%s archived:false", username)
-	prs, err := c.searchPRs(ctx, query, PRStatusWaiting)
-	if err != nil {
-		return nil, err
-	}
-
-	// For review-requested PRs, the status is always "waiting" (for my review)
-	// Fetch CI statuses
-	c.fetchCIStatuses(ctx, prs)
-
-	return prs, nil
 }
