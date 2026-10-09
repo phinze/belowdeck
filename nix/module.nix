@@ -105,6 +105,8 @@ in
         "/usr/sbin"
         "/sbin"
         (builtins.dirOf cfg.mediaControlPath)
+        # Power-cycles the deck's USB port when its HID endpoint wedges.
+        "${pkgs.uhubctl}/bin"
         "/etc/profiles/per-user/${cfg.user}/bin"
       ];
       serviceConfig = {

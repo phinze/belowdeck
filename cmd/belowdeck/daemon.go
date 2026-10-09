@@ -24,6 +24,7 @@ import (
 	"github.com/phinze/belowdeck/internal/modules/homeassistant"
 	"github.com/phinze/belowdeck/internal/modules/nowplaying"
 	"github.com/phinze/belowdeck/internal/modules/weather"
+	"github.com/phinze/belowdeck/internal/portbounce"
 	"github.com/phinze/belowdeck/internal/usbwatch"
 	"github.com/prashantgupta24/mac-sleep-notifier/notifier"
 	"github.com/spf13/cobra"
@@ -74,7 +75,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}()
 
 	// Start event-driven USB device watcher (fires callback on device arrival)
-	deviceArrivedCh := usbwatch.Watch(ctx, 0x0fd9)
+	deviceArrivedCh := usbwatch.Watch(ctx, elgatoVendorID)
 
 	// Main device loop - wait for device, run, repeat on disconnect
 	for {
@@ -258,6 +259,13 @@ func waitForHardwareDevice(ctx context.Context, wakeCh <-chan struct{}, deviceAr
 	}
 }
 
+// USB IDs for the deck. The port bounce matches on both, because the Cam Link
+// sharing the desk is also Elgato and bouncing it would be rude.
+const (
+	elgatoVendorID          = 0x0fd9
+	streamDeckPlusProductID = 0x0084
+)
+
 // Consecutive device-init timeouts are tracked on disk because each one ends
 // the process, so an in-memory counter would always read one.
 const (
@@ -277,33 +285,68 @@ func initFailurePath() string {
 	return filepath.Join(dir, "belowdeck-init-failures")
 }
 
-// noteInitFailure records another init timeout and returns the length of the
-// current streak.
-func noteInitFailure() int {
-	count := 0
-	if b, err := os.ReadFile(initFailurePath()); err == nil {
-		var n int
-		var unix int64
-		if _, err := fmt.Sscanf(strings.TrimSpace(string(b)), "%d %d", &n, &unix); err == nil {
-			if time.Since(time.Unix(unix, 0)) < initFailureWindow {
-				count = n
-			}
-		}
+// initStreak is the on-disk record of consecutive init failures.
+type initStreak struct {
+	failures int
+	// bounced records that the deck's USB port has already been power-cycled
+	// during this streak, so a bounce that did not help is not repeated.
+	bounced bool
+}
+
+// readInitStreak returns the current streak, or a zero streak when there is
+// none or the last failure fell outside the window.
+func readInitStreak() initStreak {
+	b, err := os.ReadFile(initFailurePath())
+	if err != nil {
+		return initStreak{}
 	}
-	count++
+	// "failures unix [bounced]"; the third field is newer than the file, so
+	// a streak written by an older binary still parses.
+	fields := strings.Fields(string(b))
+	if len(fields) < 2 {
+		return initStreak{}
+	}
+	var s initStreak
+	var unix int64
+	if _, err := fmt.Sscan(fields[0], &s.failures); err != nil {
+		return initStreak{}
+	}
+	if _, err := fmt.Sscan(fields[1], &unix); err != nil {
+		return initStreak{}
+	}
+	if time.Since(time.Unix(unix, 0)) >= initFailureWindow {
+		return initStreak{}
+	}
+	s.bounced = len(fields) > 2 && fields[2] == "1"
+	return s
+}
+
+func writeInitStreak(s initStreak) {
 	path := initFailurePath()
+	bounced := 0
+	if s.bounced {
+		bounced = 1
+	}
 	// The cache directory is not guaranteed to exist. Without this the write
 	// fails silently, the streak never advances, and the loud message that
 	// tells a human to replug the device never fires.
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		log.Printf("Warning: cannot record init failure streak: %v", err)
-		return count
+		return
 	}
 	if err := os.WriteFile(path,
-		[]byte(fmt.Sprintf("%d %d", count, time.Now().Unix())), 0o644); err != nil {
+		[]byte(fmt.Sprintf("%d %d %d", s.failures, time.Now().Unix(), bounced)), 0o644); err != nil {
 		log.Printf("Warning: cannot record init failure streak: %v", err)
 	}
-	return count
+}
+
+// noteInitFailure records another init failure and returns the streak it
+// extends.
+func noteInitFailure() initStreak {
+	s := readInitStreak()
+	s.failures++
+	writeInitStreak(s)
+	return s
 }
 
 func clearInitFailures() {
@@ -371,15 +414,36 @@ func initDevice(dev initTarget) error {
 // exitAfterInitFailure records the failure, says as much as the streak
 // warrants, and ends the process so launchd can supply a fresh one. It does
 // not return.
+//
+// On the first failure of a streak it also power-cycles the deck's USB port.
+// Every init failure seen so far has been the deck's own HID endpoint wedged,
+// which no number of fresh processes clears, and both incidents ran until
+// someone replugged the deck by hand. Cycling the port is that same replug
+// done in software, it takes a few seconds, and the deck is dark anyway, so
+// there is nothing to gain by waiting to see whether a respawn helps first.
 func exitAfterInitFailure(err error, deviceArrivedCh <-chan struct{}) {
-	failures := noteInitFailure()
+	streak := noteInitFailure()
+	failures := streak.failures
 	if failures >= initFailureLoud {
+		verdict := "respawning will not clear it"
+		if streak.bounced {
+			verdict = "neither respawning nor power-cycling its USB port cleared it"
+		}
 		log.Printf("Device init failed %d times in a row, each on a fresh process (last: %v). "+
-			"The Stream Deck's HID endpoint is wedged and respawning will not clear it: "+
-			"unplug the device and plug it back in.", failures, err)
+			"The Stream Deck's HID endpoint is wedged and %s: "+
+			"unplug the device and plug it back in.", failures, err, verdict)
 	} else {
 		log.Printf("Device init failed (%v), exiting for clean respawn", err)
 	}
+
+	// A bounce that could not run (no uhubctl, or a hub that cannot switch
+	// port power) leaves the streak unmarked and is tried again next time,
+	// while the ladder carries on exactly as it did before bouncing existed.
+	if !streak.bounced && bounceDeckPort() {
+		streak.bounced = true
+		writeInitStreak(streak)
+	}
+
 	if d := initBackoff(failures); d > 0 {
 		log.Printf("Backing off %s before exiting", d)
 		if backoffUntilArrival(d, deviceArrivedCh) {
@@ -387,6 +451,21 @@ func exitAfterInitFailure(err error, deviceArrivedCh <-chan struct{}) {
 		}
 	}
 	os.Exit(1)
+}
+
+// bounceDeckPort power-cycles the deck's USB port and reports whether it did.
+// The respawned process finds the deck when it re-enumerates, through the
+// usual arrival edge or the probe timer behind it.
+func bounceDeckPort() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	loc, err := portbounce.Bounce(ctx, elgatoVendorID, streamDeckPlusProductID, 2*time.Second)
+	if err != nil {
+		log.Printf("Port bounce not possible: %v", err)
+		return false
+	}
+	log.Printf("Power-cycled the deck's USB port (%s)", loc)
+	return true
 }
 
 // backoffUntilArrival sleeps for d unless a USB device arrives first, and

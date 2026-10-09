@@ -20,7 +20,7 @@ func TestInitFailureStreakAccumulates(t *testing.T) {
 	clearInitFailures()
 
 	for want := 1; want <= 4; want++ {
-		if got := noteInitFailure(); got != want {
+		if got := noteInitFailure().failures; got != want {
 			t.Fatalf("noteInitFailure() = %d, want %d", got, want)
 		}
 	}
@@ -34,7 +34,7 @@ func TestSuccessfulInitClearsStreak(t *testing.T) {
 	noteInitFailure()
 	clearInitFailures()
 
-	if got := noteInitFailure(); got != 1 {
+	if got := noteInitFailure().failures; got != 1 {
 		t.Fatalf("after clear, noteInitFailure() = %d, want 1", got)
 	}
 }
@@ -54,8 +54,52 @@ func TestStaleStreakStartsOver(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := noteInitFailure(); got != 1 {
+	if got := noteInitFailure().failures; got != 1 {
 		t.Fatalf("stale streak continued: got %d, want 1", got)
+	}
+}
+
+func TestBounceIsRememberedForTheStreak(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearInitFailures()
+
+	// The port bounce runs once per streak. If the record of it were lost,
+	// a deck the bounce cannot fix would be bounced on every respawn.
+	s := noteInitFailure()
+	if s.bounced {
+		t.Fatal("fresh streak reports a bounce")
+	}
+	s.bounced = true
+	writeInitStreak(s)
+
+	s = noteInitFailure()
+	if s.failures != 2 || !s.bounced {
+		t.Fatalf("noteInitFailure() = %+v, want 2 failures with bounce remembered", s)
+	}
+
+	clearInitFailures()
+	if s := noteInitFailure(); s.bounced {
+		t.Fatal("bounce survived a successful init")
+	}
+}
+
+func TestStreakFromOlderBinaryStillCounts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearInitFailures()
+
+	// Binaries before the port bounce wrote "failures unix" with no bounce
+	// field. An upgrade in the middle of a streak should continue it, with
+	// the bounce still to try.
+	if err := os.MkdirAll(filepath.Dir(initFailurePath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(initFailurePath(),
+		[]byte(fmt.Sprintf("%d %d", 2, time.Now().Unix())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if s := noteInitFailure(); s.failures != 3 || s.bounced {
+		t.Fatalf("noteInitFailure() = %+v, want 3 failures and no bounce", s)
 	}
 }
 
