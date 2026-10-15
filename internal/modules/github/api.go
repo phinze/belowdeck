@@ -147,14 +147,18 @@ func (c *Client) GetReviewRequestedPRList(ctx context.Context) ([]PRInfo, error)
 		return nil, err
 	}
 
-	// These are waiting on me regardless of what other reviewers decided, so
-	// only draft-ness is worth distinguishing.
-	for i := range prs {
-		if prs[i].Status != PRStatusDraft {
-			prs[i].Status = PRStatusWaiting
+	// A draft isn't asking for review yet, so it stays out of the queue (and
+	// out of the overlay, so the two still agree). Everything else is waiting
+	// on me regardless of what other reviewers decided.
+	queue := prs[:0]
+	for _, pr := range prs {
+		if pr.Status == PRStatusDraft {
+			continue
 		}
+		pr.Status = PRStatusWaiting
+		queue = append(queue, pr)
 	}
-	return prs, nil
+	return queue, nil
 }
 
 // searchQuery pulls everything the module shows in one round trip per page.

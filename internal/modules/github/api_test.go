@@ -152,12 +152,15 @@ func TestSearchPRsFollowsPagesAndSorts(t *testing.T) {
 	}
 }
 
-func TestReviewRequestedIgnoresOtherReviewers(t *testing.T) {
+// Drafts aren't asking for review yet, so they drop out of the queue; the
+// rest wait on me no matter what other reviewers decided.
+func TestReviewRequestedSkipsDraftsAndIgnoresOtherReviewers(t *testing.T) {
 	c := fakeGraphQL(t, map[string][]fakeNode{
 		"": {
 			{repo: "o/r", number: 1, decision: "APPROVED"},
 			{repo: "o/r", number: 2, decision: "CHANGES_REQUESTED"},
 			{repo: "o/r", number: 3, draft: true},
+			{repo: "o/r", number: 4, draft: true, decision: "APPROVED"},
 		},
 	})
 
@@ -165,11 +168,14 @@ func TestReviewRequestedIgnoresOtherReviewers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []PRStatus{PRStatusWaiting, PRStatusWaiting, PRStatusDraft}
-	for i, pr := range prs {
-		if pr.Status != want[i] {
-			t.Errorf("#%d status = %q, want %q", pr.Number, pr.Status, want[i])
-		}
+
+	var got []string
+	for _, pr := range prs {
+		got = append(got, fmt.Sprintf("#%d %s", pr.Number, pr.Status))
+	}
+	want := []string{"#1 waiting", "#2 waiting"}
+	if strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
