@@ -32,6 +32,7 @@ var (
 	colorAmber    = color.RGBA{255, 191, 0, 255}
 	colorLightRay = color.RGBA{255, 245, 180, 255}
 	colorDimGray  = color.RGBA{80, 80, 80, 255}
+	colorAlertRed = color.RGBA{220, 60, 50, 255}
 )
 
 const keySize = 72
@@ -68,7 +69,10 @@ func (m *Module) renderOfficeTimeButton() image.Image {
 	var iconColor color.Color
 	var labelText string
 
-	if state.On {
+	if state.Unavailable {
+		iconColor = colorDimGray
+		labelText = "Office N/A"
+	} else if state.On {
 		iconColor = colorAmber
 		labelText = "Office On"
 	} else {
@@ -83,8 +87,12 @@ func (m *Module) renderOfficeTimeButton() image.Image {
 	draw.Draw(img, image.Rect(iconX, iconY, iconX+40, iconY+40), iconImg, image.Point{}, draw.Over)
 
 	// Draw light rays when on
-	if state.On {
+	if state.On && !state.Unavailable {
 		drawLightRays(img, colorLightRay)
+	}
+
+	if state.Unavailable {
+		m.drawUnavailableBadge(img)
 	}
 
 	// Draw label at bottom
@@ -170,7 +178,10 @@ func (m *Module) renderRingLightButton() image.Image {
 	var iconColor color.Color
 	var labelText string
 
-	if state.On {
+	if state.Unavailable {
+		iconColor = colorDimGray
+		labelText = "Ring N/A"
+	} else if state.On {
 		// Scale brightness (0-255) to color intensity
 		var brightness uint8
 		if state.Brightness != nil {
@@ -194,10 +205,37 @@ func (m *Module) renderRingLightButton() image.Image {
 	iconY := 8
 	draw.Draw(img, image.Rect(iconX, iconY, iconX+40, iconY+40), iconImg, image.Point{}, draw.Over)
 
+	if state.Unavailable {
+		m.drawUnavailableBadge(img)
+	}
+
 	// Draw label at bottom
 	m.drawTextCentered(img, labelText, keySize/2, 62, m.labelFace, colorWhite)
 
 	return img
+}
+
+// Badge geometry: a red disc with a "!" tucked into the key's top-right
+// corner, clear of the icon, so it reads as "HA can't see this light" rather
+// than "this light is off".
+const (
+	badgeCX     = 61
+	badgeCY     = 11
+	badgeRadius = 8
+)
+
+// drawUnavailableBadge marks a key whose light HA reports as unavailable.
+func (m *Module) drawUnavailableBadge(img *image.RGBA) {
+	r2 := badgeRadius * badgeRadius
+	for y := badgeCY - badgeRadius; y <= badgeCY+badgeRadius; y++ {
+		for x := badgeCX - badgeRadius; x <= badgeCX+badgeRadius; x++ {
+			dx, dy := x-badgeCX, y-badgeCY
+			if dx*dx+dy*dy <= r2 {
+				img.Set(x, y, colorAlertRed)
+			}
+		}
+	}
+	m.drawTextCentered(img, "!", badgeCX, badgeCY+4, m.labelFace, colorWhite)
 }
 
 // renderSVGIcon renders an SVG string to an image with the given size and color.

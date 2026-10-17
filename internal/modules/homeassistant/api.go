@@ -14,6 +14,12 @@ import (
 type LightState struct {
 	On         bool
 	Brightness *uint8 // 0-255, nil if not reported
+
+	// Unavailable means HA can't reach the light right now (its state is
+	// "unavailable" or "unknown"), so On says nothing about whether it's lit.
+	// Hue lights drop out like this for minutes at a time, and rendering that
+	// as "off" makes a key press look like it didn't work.
+	Unavailable bool
 }
 
 // Client is a Home Assistant API client.
@@ -104,7 +110,8 @@ func (c *Client) GetLightState(ctx context.Context, entityID string) (LightState
 	}
 
 	state := LightState{
-		On: data.State == "on",
+		On:          data.State == "on",
+		Unavailable: data.State == "unavailable" || data.State == "unknown",
 	}
 
 	if data.Attributes.Brightness != nil {
