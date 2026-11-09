@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/phinze/belowdeck/internal/device"
 	"github.com/phinze/belowdeck/internal/module"
@@ -32,6 +33,9 @@ type Module struct {
 
 	// Cancel function for media stream
 	streamCancel context.CancelFunc
+
+	// Asks reconcileLoop to reschedule (see requestCheck)
+	wake chan time.Duration
 }
 
 // New creates a new NowPlaying module.
@@ -40,6 +44,7 @@ func New(dev device.Device) *Module {
 		BaseModule: module.NewBaseModule("nowplaying"),
 		device:     dev,
 		liveState:  newLiveState(),
+		wake:       make(chan time.Duration, 4),
 	}
 }
 
@@ -64,6 +69,7 @@ func (m *Module) Init(ctx context.Context, res module.Resources) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	m.streamCancel = cancel
 	go m.startMediaStream(streamCtx)
+	go m.reconcileLoop(streamCtx)
 
 	log.Println("NowPlaying module initialized")
 	return nil
@@ -122,7 +128,9 @@ func (m *Module) RenderStrip() image.Image {
 
 	// Update artwork cache if changed
 	m.mu.Lock()
-	if np.ArtworkData != "" && np.ArtworkData != m.artworkHash {
+	if np.ArtworkData == "" {
+		m.cachedArtwork, m.artworkHash = nil, ""
+	} else if np.ArtworkData != m.artworkHash {
 		if img := decodeArtwork(np.ArtworkData); img != nil {
 			m.cachedArtwork = img
 			m.artworkHash = np.ArtworkData
@@ -188,9 +196,11 @@ func (m *Module) HandleDial(id module.DialID, event module.DialEvent) error {
 			if event.Delta < 0 {
 				log.Println("Dial: Previous track")
 				go exec.Command("media-control", "previous-track").Run()
+				m.requestCheck(keyCheck)
 			} else {
 				log.Println("Dial: Next track")
 				go exec.Command("media-control", "next-track").Run()
+				m.requestCheck(keyCheck)
 			}
 		}
 	}

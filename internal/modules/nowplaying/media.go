@@ -22,6 +22,15 @@ type NowPlaying struct {
 	ArtworkData          string `json:"artworkData"`
 	ArtworkMime          string `json:"artworkMimeType"`
 	BundleIdentifier     string `json:"bundleIdentifier"`
+	ContentItemID        string `json:"contentItemIdentifier"`
+}
+
+// trackKey identifies the current track, for noticing when it changes.
+func (np *NowPlaying) trackKey() string {
+	if np.ContentItemID != "" {
+		return np.ContentItemID
+	}
+	return np.Artist + "\x00" + np.Album + "\x00" + np.Title
 }
 
 // liveState wraps NowPlaying with thread-safe access.
@@ -110,10 +119,16 @@ func (m *Module) runMediaStream(ctx context.Context) {
 				TimestampEpochMicros: time.Now().UnixMicro(),
 			}
 		} else {
-			// Merge only fields that are present in the payload
+			// Merge only fields that are present in the payload. A new
+			// track without artwork must not inherit the old track's.
+			before := m.liveState.trackKey()
 			mergePayloadMap(&m.liveState.NowPlaying, payloadMap)
+			if _, hasArt := payloadMap["artworkData"]; !hasArt && m.liveState.trackKey() != before {
+				m.liveState.ArtworkData, m.liveState.ArtworkMime = "", ""
+			}
 		}
 		m.liveState.Unlock()
+		m.requestCheck(0)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -158,6 +173,9 @@ func mergePayloadMap(dst *NowPlaying, src map[string]interface{}) {
 	}
 	if v, ok := src["parentApplicationBundleIdentifier"].(string); ok {
 		dst.BundleIdentifier = v
+	}
+	if v, ok := src["contentItemIdentifier"].(string); ok {
+		dst.ContentItemID = v
 	}
 }
 
